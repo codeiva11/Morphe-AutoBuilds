@@ -251,18 +251,11 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
 
             logging.info(f"Normalized APK file: {input_apk}")
 
-        # --- ARCHITECTURE-SPECIFIC PROCESSING ---
-        if arch != "universal":
-            logging.info(f"Processing APK for {arch} architecture...")
-            if arch == "arm64-v8a":
-                utils.strip_zip_entries(input_apk, ["lib/x86/*", "lib/x86_64/*", "lib/armeabi-v7a/*"])
-            elif arch == "armeabi-v7a":
-                utils.strip_zip_entries(input_apk, ["lib/x86/*", "lib/x86_64/*", "lib/arm64-v8a/*"])
-        else:
-            utils.strip_zip_entries(input_apk, ["lib/x86/*", "lib/x86_64/*"])
-
-        # Validate APK integrity (safety net: downloads were already validated,
-        # but bundle merging / arch stripping can corrupt the file).
+        # Validate APK integrity before patching.
+        # NOTE: Do NOT strip architectures from input_apk before patching,
+        # because zip modification removes the stock APK signing block, causing
+        # signature-dependent patches (e.g., Spoof Signature in Proton Mail) to fail with
+        # "app being patched is not signed". Arch stripping is done after patching.
         logging.info("Checking APK integrity...")
         input_apk = utils.ensure_usable_apk(input_apk, app_name, version or "")
         if input_apk is None:
@@ -279,6 +272,7 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
                 morphe_cmd = [
                     "java", "-jar", str(cli),
                     "patch", "--patches", str(patches),
+                    "--continue-on-error",
                     "--out", str(output_apk), str(input_apk),
                     *exclude_patches, *include_patches
                 ]
@@ -314,8 +308,18 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
                 continue
             raise
 
-        # Patch succeeded -> cleanup input and sign.
+        # Patch succeeded -> cleanup input.
         input_apk.unlink(missing_ok=True)
+
+        # Architecture-specific stripping on the patched APK prior to signing.
+        if arch != "universal":
+            logging.info(f"Stripping unused architectures for {arch}...")
+            if arch == "arm64-v8a":
+                utils.strip_zip_entries(output_apk, ["lib/x86/*", "lib/x86_64/*", "lib/armeabi-v7a/*"])
+            elif arch == "armeabi-v7a":
+                utils.strip_zip_entries(output_apk, ["lib/x86/*", "lib/x86_64/*", "lib/arm64-v8a/*"])
+        else:
+            utils.strip_zip_entries(output_apk, ["lib/x86/*", "lib/x86_64/*"])
 
         signed_apk = Path(f"{app_name}-{arch}-{name}-v{version}.apk")
 
