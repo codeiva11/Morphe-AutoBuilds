@@ -657,8 +657,12 @@ def is_apk_signed(apk_path: Path) -> bool:
             if len(header) < 24 or header[8:] != sig_block_magic:
                 return False
             block_size = struct.unpack("<Q", header[:8])[0]
-            f.seek(cd_offset - 24 - block_size + 8)
-            remaining = block_size - 8
+            # The APK Signing Block starts at (cd_offset - block_size - 8).
+            # The ID-value pairs start after the first 8-byte size field,
+            # which is at offset (cd_offset - block_size).
+            # The pairs end before the second size field, at (cd_offset - 24).
+            f.seek(cd_offset - block_size)
+            remaining = block_size - 24
             while remaining >= 12:
                 pair = f.read(12)
                 if len(pair) < 12:

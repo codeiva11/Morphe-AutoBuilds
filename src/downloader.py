@@ -10,6 +10,7 @@ from src import (
     aptoide,
     apkmirror,
     github,
+    codeberg,
     apkcombo,
 )
 
