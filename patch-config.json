@@ -43,6 +43,10 @@
     {
       "app_name": "telegram",
       "source": "paresh"
+    },
+    {
+      "app_name": "x-new",
+      "source": "piko-newx"
     }
   ]
 }
