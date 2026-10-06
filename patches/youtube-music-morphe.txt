@@ -1,4 +1,5 @@
 -AddResourcesPatch
+- Custom branding
 - Custom branding icon for YouTube Music
 - Custom branding name for YouTube Music
 - custom-branding

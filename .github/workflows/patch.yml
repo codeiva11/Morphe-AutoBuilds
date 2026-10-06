@@ -270,6 +270,24 @@ jobs:
           echo "📦 Collecting rebuilt APKs..."
           find ./all-apks -name "*.apk" -exec cp -f {} ./release-apks/ \; 2>/dev/null || true
 
+          echo "🚀 Fetching and signing official MicroG-RE..."
+          mkdir -p ./microg_temp
+          curl -sL https://api.github.com/repos/MorpheApp/MicroG-RE/releases/latest | \
+            jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | while read -r url; do
+              fname=$(basename "$url")
+              echo "Downloading $fname..."
+              curl -sL "$url" -o "./microg_temp/$fname"
+              echo "Re-signing $fname with repository keystore..."
+              apksigner sign --verbose \
+                --ks keystore/public.jks \
+                --ks-pass pass:public \
+                --key-pass pass:public \
+                --ks-key-alias public \
+                --in "./microg_temp/$fname" \
+                --out "./release-apks/$fname" || cp -f "./microg_temp/$fname" "./release-apks/$fname"
+            done
+          rm -rf ./microg_temp
+
           echo "📁 APKs ready for release:"
           ls -la ./release-apks/
 
