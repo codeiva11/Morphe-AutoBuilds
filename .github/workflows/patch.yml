@@ -1,8 +1,5 @@
 name: Auto Build and Release Morphe
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 on:
   workflow_dispatch:
     inputs:
@@ -17,7 +14,7 @@ on:
 jobs:
   download-tools:
     name: Download Morphe Tools
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: ${{ false }}
     outputs:
       cache-key: ${{ steps.cache-key.outputs.cache-key }}
@@ -54,7 +51,7 @@ jobs:
 
   check-updates:
     name: Check for Updates
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       has_updates: ${{ steps.check.outputs.has_updates }}
       build_matrix: ${{ steps.check.outputs.build_matrix }}
@@ -114,7 +111,7 @@ jobs:
   patch-apps:
     name: Read Configuration
     needs: check-updates
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: needs.check-updates.outputs.has_updates == 'true'
     outputs:
       matrix: ${{ steps.read-matrix.outputs.matrix }}
@@ -137,7 +134,7 @@ jobs:
   build-apps:
     name: Build Applications
     needs: patch-apps
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       trawl:
         image: ghcr.io/germondai/trawl:latest
@@ -223,7 +220,7 @@ jobs:
   create-single-release:
     name: Create Single Release
     needs: [check-updates, build-apps]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: always() && needs.check-updates.outputs.has_updates == 'true'
     permissions:
       contents: write
@@ -465,7 +462,7 @@ jobs:
   cleanup:
     name: Cleanup Workflow Runs
     needs: [build-apps, create-single-release]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: always()
     permissions:
       actions: write

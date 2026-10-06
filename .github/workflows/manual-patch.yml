@@ -1,8 +1,5 @@
 name: Manual Patch and Update
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 on:
   workflow_dispatch:
     inputs:
@@ -38,7 +35,7 @@ on:
 
 jobs:
   manual-patch:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       trawl:
         image: ghcr.io/germondai/trawl:latest
