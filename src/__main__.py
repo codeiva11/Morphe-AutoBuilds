@@ -56,9 +56,9 @@ def _unpatched_build_reason(output: str | None, downloaded_version: str) -> str 
             "refusing to sign an unpatched APK"
         )
 
-    downloaded = utils.normalize_version(_version_without_build(downloaded_version))
+    downloaded = utils.normalize_version(_version_without_build(downloaded_version).rstrip('.'))
     for match in _FILTERING_PATCHES.finditer(output):
-        package, filtered = match.group(1), match.group(2).strip()
+        package, filtered = match.group(1), match.group(2).strip().rstrip('.')
         if utils.normalize_version(_version_without_build(filtered)) != downloaded:
             return (
                 f"Patch CLI filtered {package} v{filtered}, "

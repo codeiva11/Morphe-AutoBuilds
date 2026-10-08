@@ -167,9 +167,12 @@ def run_process(
         raise e
 
 def normalize_version(version: str) -> list[int]:
-    parts = version.split('.')
+    clean_version = version.strip().rstrip('.')
+    parts = clean_version.split('.')
     normalized = []
     for part in parts:
+        if not part:
+            continue
         match = re.match(r'(\d+)', part)
         if match:
             normalized.append(int(match.group(1)))
