@@ -63,6 +63,25 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync with Upstream
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/RookieEnough/Morphe-AutoBuilds.git || true
+          git fetch upstream main
+          BEHIND=$(git rev-list --count HEAD..upstream/main)
+          echo "Commits behind upstream: $BEHIND"
+          if [ "$BEHIND" -gt 0 ]; then
+            echo "Merging upstream updates..."
+            git merge upstream/main -X ours --no-edit -m "chore: sync upstream scraper fixes [skip ci]" || true
+            git push origin main || true
+          else
+            echo "Already fully in sync with upstream."
+          fi
 
       - name: Setup Python
         uses: actions/setup-python@v5
