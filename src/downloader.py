@@ -12,6 +12,8 @@ from src import (
     github,
     codeberg,
     apkcombo,
+    apkfab,
+    codeberg,
 )
 
 
@@ -150,7 +152,7 @@ def download_platform(
                 config = json.load(json_file)
         else:
             # Fallback: search other platform config directories for this app
-            for other_platform in ["apkmirror", "uptodown", "apkpure", "aptoide", "github", "apkcombo"]:
+            for other_platform in ["apkmirror", "uptodown", "apkpure", "aptoide", "github", "apkcombo", "apkfab"]:
                 if other_platform == platform:
                     continue
                 other_path = Path("apps") / other_platform / f"{app_name}.json"
@@ -307,6 +309,15 @@ def download_apkcombo(
     override_version: str = None,
 ) -> tuple[Path | None, str | None, list[str]]:
     return download_platform(app_name, "apkcombo", cli, patches, arch, override_version)
+
+def download_apkfab(
+    app_name: str,
+    cli: str,
+    patches: str,
+    arch: str = None,
+    override_version: str = None,
+) -> tuple[Path | None, str | None, list[str]]:
+    return download_platform(app_name, "apkfab", cli, patches, arch, override_version)
 
 def download_apkeditor() -> Path:
     max_retries = 3

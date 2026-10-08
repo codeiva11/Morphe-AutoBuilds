@@ -21,7 +21,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from src import gitlab_api
+import importlib.util as _ilu
+def _load_gitlab_api():
+    _spec = _ilu.spec_from_file_location(
+        "gitlab_api", Path(__file__).resolve().parent.parent / "src" / "gitlab_api.py")
+    _mod = _ilu.module_from_spec(_spec)
+    sys.modules["gitlab_api"] = _mod
+    _spec.loader.exec_module(_mod)
+    return _mod
+gitlab_api = _load_gitlab_api()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
                     datefmt="%Y-%m-%d %H:%M:%S")
@@ -71,6 +79,33 @@ def main() -> int:
         return 0
 
     # 1. Upload everything first (never delete before the new files are up).
+    # GitLab rejects some filename characters (e.g. parentheses -> HTTP 400
+    # "file_name is invalid"). Rename on disk first so build records,
+    # manifest.json, asset links and package files all agree on the name.
+    renames: dict[str, str] = {}
+    for apk in apks:
+        safe = gitlab_api.safe_filename(apk.name)
+        if safe != apk.name:
+            target = apk.with_name(safe)
+            if target.exists():
+                target.unlink()
+            apk.rename(target)
+            renames[apk.name] = safe
+            logging.info(f"Renamed {apk.name} -> {safe} for GitLab")
+            apk = target
+    if renames and manifest.exists():
+        try:
+            import json as _json
+            data = _json.loads(manifest.read_text(encoding="utf-8"))
+            for entry in data.get("entries", {}).values():
+                if entry.get("apk", "") in renames:
+                    entry["apk"] = renames[entry["apk"]]
+            manifest.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+            logging.info(f"Patched manifest.json for {len(renames)} renamed files")
+        except Exception as e:
+            logging.warning(f"Could not patch manifest.json filenames: {e}")
+    apks = sorted(apks_dir.glob("*.apk"))
+
     urls: dict[str, str] = {}
     for apk in apks:
         urls[apk.name] = gitlab_api.upload_package_file(apk)
@@ -101,6 +136,24 @@ def main() -> int:
         gitlab_api.ensure_release(args.tag, title, notes, ref)
         gitlab_api.replace_asset_links(args.tag, [(n, u) for n, u in urls.items()])
         keep = set(urls)
+    # Clean up superseded APKs from the package registry.
+    # The asset-links API is unreliable, so we list package files directly.
+    # For each app prefix, keep only the files in 'keep' (current versions).
+    try:
+        all_files = gitlab_api.list_package_files()
+        for f in all_files:
+            name = f.get("file_name", "")
+            if not name.endswith(".apk") or name in keep:
+                continue
+            prefix = identity_prefix(name)
+            if not prefix:
+                continue
+            if any(k != name and k.startswith(prefix) for k in keep):
+                logging.info(f"Deleting superseded package file: {name}")
+                gitlab_api.delete_package_file(name)
+    except Exception as e:
+        logging.warning(f"Package cleanup failed: {e}")
+    # Also clean up stale asset links if any exist
     for link in gitlab_api.list_asset_links(args.tag):
         name = link.get("name", "")
         if not name.endswith(".apk") or name in keep:
@@ -109,9 +162,16 @@ def main() -> int:
         if not prefix:
             continue
         if any(k != name and (k.startswith(prefix)) for k in keep):
-            logging.info(f"Deleting superseded asset: {name}")
+            logging.info(f"Deleting superseded asset link: {name}")
             gitlab_api.delete_asset_link(args.tag, link["id"])
-            gitlab_api.delete_package_file(name)
+
+    if args.merge:
+        # Refresh release notes from the final asset set: merge mode otherwise
+        # preserves the old notes, which would list stale filenames.
+        final_names = [l["name"] for l in gitlab_api.list_asset_links(args.tag)]
+        if final_names:
+            mtitle, mnotes = build_release_notes(final_names)
+            gitlab_api.ensure_release(args.tag, mtitle, mnotes, ref)
 
     logging.info("GitLab release publish complete.")
     return 0

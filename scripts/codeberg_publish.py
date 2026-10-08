@@ -9,7 +9,7 @@ Usage:
     python scripts/codeberg_publish.py \
         --token "$CODEBERG_TOKEN" \
         --owner RookieZ \
-        --repo Morphe-Releases \
+        --repo Community-Builds \
         --tag latest \
         --apk-dir ./all-apks
 """
@@ -59,8 +59,26 @@ def api(method: str, path: str, token: str, data=None, headers=None):
         raise
 
 
+def ensure_releases_enabled(owner: str, repo: str, token: str):
+    """Forgejo repos can be created with the releases feature disabled
+    (has_releases=false), which makes every /releases endpoint 404. The
+    RookieZ/Community-Builds repo was created that way, so enable it via
+    the edit-repo API before touching releases."""
+    try:
+        r, _ = api("GET", f"/repos/{owner}/{repo}", token)
+    except Exception as e:
+        logging.warning(f"could not read repo settings, skipping releases check: {e}")
+        return
+    if r.get("has_releases"):
+        return
+    logging.info("Releases are disabled on this repo; enabling via repo settings...")
+    api("PATCH", f"/repos/{owner}/{repo}", token, {"has_releases": True})
+    logging.info("Releases enabled on the repo.")
+
+
 def get_or_create_release(owner: str, repo: str, tag: str, token: str) -> dict:
     """Get the release by tag, or create it if missing."""
+    ensure_releases_enabled(owner, repo, token)
     try:
         rel, _ = api("GET", f"/repos/{owner}/{repo}/releases/tags/{tag}", token)
         logging.info(f"Found existing release '{tag}' (id={rel['id']})")
@@ -143,6 +161,8 @@ def main():
     p.add_argument("--repo", required=True)
     p.add_argument("--tag", default="latest")
     p.add_argument("--apk-dir", required=True)
+    p.add_argument("--clobber", action="store_true",
+                   help="delete an existing asset with the same name before uploading")
     args = p.parse_args()
 
     apk_dir = Path(args.apk_dir)
@@ -158,6 +178,14 @@ def main():
 
     rel = get_or_create_release(args.owner, args.repo, args.tag, args.token)
     release_id = rel["id"]
+
+    # Clobber: remove same-name assets first so re-uploads replace cleanly
+    if args.clobber:
+        existing = {a["name"]: a["id"] for a in rel.get("assets", [])}
+        for f in list(apks) + list(manifests):
+            dup_id = existing.get(f.name)
+            if dup_id:
+                delete_asset(args.owner, args.repo, release_id, args.token, dup_id, f.name)
 
     # Upload new APKs first (never delete before upload succeeds)
     uploaded_names = []

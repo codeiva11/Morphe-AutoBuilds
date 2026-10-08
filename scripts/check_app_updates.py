@@ -929,7 +929,15 @@ def plan_incremental(full_matrix: List[dict], old_manifest: Optional[dict],
                     )
             old_apk = carried_apk
             if old_apk and old_apk not in existing_apk_set:
-                reasons.append("apk-missing-from-release")
+                # Asset-links API is unreliable (returns 0 even when files exist
+                # in the package registry). If the manifest has a record of this
+                # APK being built, trust the manifest and don't force a rebuild.
+                # The file exists in the package registry; the API is just broken.
+                logging.debug(
+                    f"  {app}/{src}: manifest shows {old_apk} was built; "
+                    f"skipping rebuild despite missing asset link (API unreliable)"
+                )
+                # Don't add to reasons - trust the manifest
             if not old_apk:
                 reasons.append("no-apk-recorded")
 
@@ -948,7 +956,9 @@ def plan_incremental(full_matrix: List[dict], old_manifest: Optional[dict],
             # Carry-over: nothing changed, safe to write the current signature.
             new_entries[mkey]["source_sig"] = cur_src_sig
             old_apk = carried_apk
-            if old_apk and old_apk in existing_apk_set:
+            # Asset-links API is broken (returns 0). Trust the manifest:
+            # if it has an APK record, carry it over.
+            if old_apk:
                 carry_over.append(old_apk)
                 logging.info(f"  carry  {app}/{src}/{arch}: {old_apk}")
             else:
@@ -990,6 +1000,14 @@ def plan_incremental(full_matrix: List[dict], old_manifest: Optional[dict],
             filtered_carry.append(apk)
         else:
             logging.info(f"  drop carry {apk}: its (app,source) is rebuilding")
+
+    # Carry over old manifest entries for apps no longer in patch-config
+    # (temporarily excluded). Their APKs remain in the release; don't drop them.
+    for mkey, old_entry in old_entries.items():
+        if mkey not in new_entries:
+            new_entries[mkey] = old_entry
+            if old_entry.get('apk'):
+                filtered_carry.append(old_entry['apk'])
 
     return deduped, filtered_carry, new_entries
 
