@@ -1,6 +1,12 @@
 name: Auto Build and Release Morphe
 
 on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - '.gitignore'
   workflow_dispatch:
     inputs:
       force_full_rebuild:
