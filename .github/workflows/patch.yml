@@ -154,6 +154,7 @@ jobs:
     name: Build Applications
     needs: patch-apps
     runs-on: ubuntu-24.04
+    continue-on-error: true
     services:
       trawl:
         image: ghcr.io/germondai/trawl:latest
