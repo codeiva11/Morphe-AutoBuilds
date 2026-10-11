@@ -27,11 +27,11 @@ def fetch(url: str, referer: str | None = None) -> ScrapedResponse | None:
     service = os.getenv("TRAWL_URL")
     if not service:
         return None
-    payload = {"url": url, "maxTimeout": 60000, "skipHttp": True}
+    payload = {"url": url, "maxTimeout": 120000, "skipHttp": True}
     if referer:
         payload["headers"] = {"Referer": referer}
     try:
-        response = requests.post(f"{service.rstrip('/')}/scrape", json=payload, timeout=90)
+        response = requests.post(f"{service.rstrip('/')}/scrape", json=payload, timeout=150)
         response.raise_for_status()
         data = response.json()
         html = data.get("html") or ""

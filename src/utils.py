@@ -656,6 +656,17 @@ def ensure_usable_apk(apk_path: Path, app_name: str, version: str) -> Path | Non
         apk_path.unlink(missing_ok=True)
         return None
 
+    if version:
+        m = re.search(r"[-_vV](\d+(?:\.\d+)+)", apk_path.name)
+        if m:
+            detected_ver = m.group(1).strip()
+            if normalize_version(detected_ver) != normalize_version(version):
+                logging.warning(
+                    f"Discarding {apk_path.name}: version mismatch (detected v{detected_ver}, requested v{version})"
+                )
+                apk_path.unlink(missing_ok=True)
+                return None
+
     if _is_bundle(apk_path):
         logging.info(f"Bundle {apk_path.name} passes zip integrity; leaving for APKEditor merge")
     else:
