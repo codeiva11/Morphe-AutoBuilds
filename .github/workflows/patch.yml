@@ -296,9 +296,14 @@ jobs:
           echo "📦 Collecting rebuilt APKs..."
           find ./all-apks -name "*.apk" -exec cp -f {} ./release-apks/ \; 2>/dev/null || true
 
-          echo "🚀 Fetching and signing official MicroG-RE..."
+          echo "🚀 Fetching and signing MicroG-RE from codeiva11/MicroG-RE..."
           mkdir -p ./microg_temp
-          curl -sL https://api.github.com/repos/MorpheApp/MicroG-RE/releases/latest | \
+          RELEASE_JSON=$(curl -sL https://api.github.com/repos/codeiva11/MicroG-RE/releases/latest)
+          if [ -z "$RELEASE_JSON" ] || [ "$(echo "$RELEASE_JSON" | jq -r '.message // empty')" = "Not Found" ]; then
+            echo "Falling back to upstream MorpheApp/MicroG-RE..."
+            RELEASE_JSON=$(curl -sL https://api.github.com/repos/MorpheApp/MicroG-RE/releases/latest)
+          fi
+          echo "$RELEASE_JSON" | \
             jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | while read -r url; do
               fname=$(basename "$url")
               echo "Downloading $fname..."
