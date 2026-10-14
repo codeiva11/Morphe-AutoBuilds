@@ -83,7 +83,7 @@ jobs:
           echo "Commits behind upstream: $BEHIND"
           if [ "$BEHIND" -gt 0 ]; then
             echo "Merging upstream updates..."
-            git merge upstream/main -X ours --no-edit -m "chore: sync upstream scraper fixes [skip ci]" || true
+            git merge upstream/main -X ours --no-edit -m "chore: sync upstream scraper fixes" || true
             git push origin main || true
           else
             echo "Already fully in sync with upstream."
