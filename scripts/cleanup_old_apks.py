@@ -52,7 +52,8 @@ from typing import List, Set
 # tokens "v8a"/"v7a" inside arm64-v8a / armeabi-v7a do NOT match (they have a
 # letter right after the digit, e.g. "v8a"). Otherwise the identity prefix would
 # be truncated at the arch segment.
-VERSION_MARKER = re.compile(r"-v\d[\d.()+\-]*\.apk$", re.IGNORECASE)
+VERSION_MARKER = re.compile(r"-v\d[\d.()+\-]*(?:-(?P<flavor>mod|original))?\.apk$", re.IGNORECASE)
+MICROG_MARKER = re.compile(r"^microg-.*?-((?:no)?icon.*?)\.apk$", re.IGNORECASE)
 
 
 def gh_release_assets(release: str) -> List[dict]:
@@ -77,10 +78,19 @@ def gh_release_assets(release: str) -> List[dict]:
 
 def identity_prefix(apk_name: str) -> str:
     """Return the identity prefix of an APK filename (everything before the
-    version marker). E.g. ``youtube-arm64-v8a-morphe-v2.5.0.apk`` ->
-    ``youtube-arm64-v8a-morphe``. Falls back to the stem if no marker matches."""
+    version marker, keeping any flavor suffix like -mod/-original).
+    E.g. ``youtube-arm64-v8a-morphe-v2.5.0.apk`` -> ``youtube-arm64-v8a-morphe``.
+    ``GooglePhotos-v7.97.0-mod.apk`` -> ``googlephotos-mod``.
+    ``microg-7.2.2-dev.2-noicon-arm64-v8a.apk`` -> ``microg-noicon-arm64-v8a``."""
+    if apk_name.lower().startswith("microg-"):
+        m_microg = MICROG_MARKER.search(apk_name)
+        return f"microg-{m_microg.group(1).lower()}" if m_microg else "microg-default"
+
     m = VERSION_MARKER.search(apk_name)
-    return (apk_name[: m.start()] if m else Path(apk_name).stem).lower()
+    if m:
+        flavor = f"-{m.group('flavor').lower()}" if m.group('flavor') else ""
+        return f"{apk_name[: m.start()].lower()}{flavor}"
+    return Path(apk_name).stem.lower()
 
 
 def load_keep_set(keep_file: Path) -> Set[str]:

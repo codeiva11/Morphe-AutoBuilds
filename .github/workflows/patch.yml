@@ -291,33 +291,59 @@ jobs:
       
       - name: Collect All APKs
         if: steps.check-apks.outputs.skip_release == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p ./release-apks
           echo "📦 Collecting rebuilt APKs..."
           find ./all-apks -name "*.apk" -exec cp -f {} ./release-apks/ \; 2>/dev/null || true
 
-          echo "🚀 Fetching and signing MicroG-RE from codeiva11/MicroG-RE..."
+          echo "🚀 Fetching MicroG-RE from codeiva11/MicroG-RE..."
           mkdir -p ./microg_temp
-          RELEASE_JSON=$(curl -sL https://api.github.com/repos/codeiva11/MicroG-RE/releases/latest)
-          if [ -z "$RELEASE_JSON" ] || [ "$(echo "$RELEASE_JSON" | jq -r '.message // empty')" = "Not Found" ]; then
+          if ! gh release download --repo codeiva11/MicroG-RE --pattern "*.apk" --dir ./microg_temp; then
             echo "Falling back to upstream MorpheApp/MicroG-RE..."
-            RELEASE_JSON=$(curl -sL https://api.github.com/repos/MorpheApp/MicroG-RE/releases/latest)
+            gh release download --repo MorpheApp/MicroG-RE --pattern "*.apk" --dir ./microg_temp || true
           fi
-          echo "$RELEASE_JSON" | \
-            jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | while read -r url; do
-              fname=$(basename "$url")
-              echo "Downloading $fname..."
-              curl -sL "$url" -o "./microg_temp/$fname"
-              echo "Re-signing $fname with repository keystore..."
-              apksigner sign --verbose \
-                --ks keystore/public.jks \
-                --ks-pass pass:public \
-                --key-pass pass:public \
-                --ks-key-alias public \
-                --in "./microg_temp/$fname" \
-                --out "./release-apks/$fname" || cp -f "./microg_temp/$fname" "./release-apks/$fname"
-            done
+          for f in ./microg_temp/*.apk; do
+            [ -f "$f" ] || continue
+            fname=$(basename "$f")
+            echo "Signing $fname with repository keystore..."
+            apksigner sign --verbose \
+              --ks keystore/public.jks \
+              --ks-pass pass:public \
+              --key-pass pass:public \
+              --ks-key-alias public \
+              --in "$f" \
+              --out "./release-apks/$fname" || cp -f "$f" "./release-apks/$fname"
+          done
           rm -rf ./microg_temp
+
+          echo "🚀 Fetching Google Photos from codeiva11/GooglePhotos-Patched..."
+          mkdir -p ./photos_temp
+          if ! gh release download --repo codeiva11/GooglePhotos-Patched --pattern "*.apk" --dir ./photos_temp; then
+            echo "Falling back to upstream Akash-Sriram/GooglePhotos-Patched..."
+            gh release download --repo Akash-Sriram/GooglePhotos-Patched --pattern "*.apk" --dir ./photos_temp || true
+          fi
+          for f in ./photos_temp/*.apk; do
+            [ -f "$f" ] || continue
+            fname=$(basename "$f")
+            echo "Signing $fname with repository keystore..."
+            apksigner sign --verbose \
+              --ks keystore/public.jks \
+              --ks-pass pass:public \
+              --key-pass pass:public \
+              --ks-key-alias public \
+              --in "$f" \
+              --out "./release-apks/$fname" || cp -f "$f" "./release-apks/$fname"
+
+            # Also create standard lowercase google-photos name for in-app updater compatibility
+            lower_name=$(echo "$fname" | sed 's/^GooglePhotos-/google-photos-/')
+            if [ "$lower_name" != "$fname" ]; then
+              cp -f "./release-apks/$fname" "./release-apks/$lower_name"
+            fi
+          done
+          rm -rf ./photos_temp
 
           echo "📁 APKs ready for release:"
           ls -la ./release-apks/
