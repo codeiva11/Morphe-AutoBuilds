@@ -53,7 +53,6 @@ from typing import List, Set
 # letter right after the digit, e.g. "v8a"). Otherwise the identity prefix would
 # be truncated at the arch segment.
 VERSION_MARKER = re.compile(r"-v\d[\d.()+\-]*(?:-(?P<flavor>mod|original))?\.apk$", re.IGNORECASE)
-MICROG_MARKER = re.compile(r"^microg-.*?-((?:no)?icon.*?)\.apk$", re.IGNORECASE)
 
 
 def gh_release_assets(release: str) -> List[dict]:
@@ -79,13 +78,7 @@ def gh_release_assets(release: str) -> List[dict]:
 def identity_prefix(apk_name: str) -> str:
     """Return the identity prefix of an APK filename (everything before the
     version marker, keeping any flavor suffix like -mod/-original).
-    E.g. ``youtube-arm64-v8a-morphe-v2.5.0.apk`` -> ``youtube-arm64-v8a-morphe``.
-    ``GooglePhotos-v7.97.0-mod.apk`` -> ``googlephotos-mod``.
-    ``microg-7.2.2-dev.2-noicon-arm64-v8a.apk`` -> ``microg-noicon-arm64-v8a``."""
-    if apk_name.lower().startswith("microg-"):
-        m_microg = MICROG_MARKER.search(apk_name)
-        return f"microg-{m_microg.group(1).lower()}" if m_microg else "microg-default"
-
+    E.g. ``youtube-arm64-v8a-morphe-v2.5.0.apk`` -> ``youtube-arm64-v8a-morphe``."""
     m = VERSION_MARKER.search(apk_name)
     if m:
         flavor = f"-{m.group('flavor').lower()}" if m.group('flavor') else ""

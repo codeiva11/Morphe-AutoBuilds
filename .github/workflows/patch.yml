@@ -299,52 +299,6 @@ jobs:
           echo "📦 Collecting rebuilt APKs..."
           find ./all-apks -name "*.apk" -exec cp -f {} ./release-apks/ \; 2>/dev/null || true
 
-          echo "🚀 Fetching MicroG-RE from codeiva11/MicroG-RE..."
-          mkdir -p ./microg_temp
-          if ! gh release download --repo codeiva11/MicroG-RE --pattern "*.apk" --dir ./microg_temp; then
-            echo "Falling back to upstream MorpheApp/MicroG-RE..."
-            gh release download --repo MorpheApp/MicroG-RE --pattern "*.apk" --dir ./microg_temp || true
-          fi
-          for f in ./microg_temp/*.apk; do
-            [ -f "$f" ] || continue
-            fname=$(basename "$f")
-            echo "Signing $fname with repository keystore..."
-            apksigner sign --verbose \
-              --ks keystore/public.jks \
-              --ks-pass pass:public \
-              --key-pass pass:public \
-              --ks-key-alias public \
-              --in "$f" \
-              --out "./release-apks/$fname" || cp -f "$f" "./release-apks/$fname"
-          done
-          rm -rf ./microg_temp
-
-          echo "🚀 Fetching Google Photos from codeiva11/GooglePhotos-Patched..."
-          mkdir -p ./photos_temp
-          if ! gh release download --repo codeiva11/GooglePhotos-Patched --pattern "*.apk" --dir ./photos_temp; then
-            echo "Falling back to upstream Akash-Sriram/GooglePhotos-Patched..."
-            gh release download --repo Akash-Sriram/GooglePhotos-Patched --pattern "*.apk" --dir ./photos_temp || true
-          fi
-          for f in ./photos_temp/*.apk; do
-            [ -f "$f" ] || continue
-            fname=$(basename "$f")
-            echo "Signing $fname with repository keystore..."
-            apksigner sign --verbose \
-              --ks keystore/public.jks \
-              --ks-pass pass:public \
-              --key-pass pass:public \
-              --ks-key-alias public \
-              --in "$f" \
-              --out "./release-apks/$fname" || cp -f "$f" "./release-apks/$fname"
-
-            # Also create standard lowercase google-photos name for in-app updater compatibility
-            lower_name=$(echo "$fname" | sed 's/^GooglePhotos-/google-photos-/')
-            if [ "$lower_name" != "$fname" ]; then
-              cp -f "./release-apks/$fname" "./release-apks/$lower_name"
-            fi
-          done
-          rm -rf ./photos_temp
-
           echo "📁 APKs ready for release:"
           ls -la ./release-apks/
 
