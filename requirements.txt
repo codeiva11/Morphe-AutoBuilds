@@ -3,3 +3,4 @@ PyGithub
 beautifulsoup4
 curl-cffi
 requests
+patchright

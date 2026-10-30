@@ -8,6 +8,7 @@ from src import session
 base_url = "https://www.apkmirror.com"
 _blocked_by_cloudflare = False
 _use_trawl = False
+_use_browser = False
 
 
 class ApkMirrorBlocked(RuntimeError):
@@ -34,12 +35,15 @@ def _cf_get(url, **kwargs):
     """Fetch with Cloudflare handling via the CI browser service.
 
     When APKMirror serves a Turnstile challenge, route the request through
-    trawl (the browser-rendering service already in CI). Once a challenge is
-    seen, stay in trawl mode for the rest of the build instead of abandoning
-    APKMirror: cookies from the rendered page are reused, and trawl is used
-    again if a later request gets challenged.
+    trawl (the browser-rendering service already in CI). If trawl cannot
+    obtain the page either, fall back to a headless Chromium render via
+    Patchright (``src.browser_fallback`` — same real-browser engine, run
+    locally on the runner). Once a challenge is seen, stay in browser mode
+    for the rest of the build instead of abandoning APKMirror: cookies from
+    the rendered page are reused, and the browser is used again if a later
+    request gets challenged.
     """
-    global _blocked_by_cloudflare, _use_trawl
+    global _blocked_by_cloudflare, _use_trawl, _use_browser
     if _blocked_by_cloudflare:
         raise ApkMirrorBlocked("APKMirror blocked this runner earlier in the build")
 
@@ -57,15 +61,28 @@ def _cf_get(url, **kwargs):
             return rendered
         return None
 
+    def _via_browser():
+        """Render the page in headless Chromium (Patchright) and sync cookies."""
+        from src import browser_fallback
+
+        rendered = browser_fallback.fetch_rendered(url)
+        if rendered:
+            for name, value in rendered.cookies.items():
+                session.cookies.set(name, value, domain=".apkmirror.com")
+            logging.info("APKMirror page obtained through the Patchright browser fallback")
+            return rendered
+        return None
+
     def _is_challenge(response) -> bool:
         if response.status_code != 403:
             return False
         body = response.text[:2000].lower()
         return response.headers.get("cf-mitigated") == "challenge" or "cloudflare" in body
 
-    # If a previous request needed trawl, try direct first (cookies may hold),
-    # then fall back to trawl without giving up on APKMirror.
-    if _use_trawl:
+    # If a previous request needed a browser, try direct first (cookies may
+    # hold), then fall back to the browser services without giving up on
+    # APKMirror.
+    if _use_trawl or _use_browser:
         response = session.get(url, **kwargs)
         if not _is_challenge(response):
             return response
@@ -75,12 +92,20 @@ def _cf_get(url, **kwargs):
                 return rendered
         except Exception as exc:
             logging.debug("APKMirror browser-service retry failed: %s", exc)
+        try:
+            rendered = _via_browser()
+            if rendered:
+                _use_browser = True
+                return rendered
+        except Exception as exc:
+            logging.debug("APKMirror browser fallback retry failed: %s", exc)
 
     response = session.get(url, **kwargs)
     if _is_challenge(response):
         # CI jobs provide Trawl, the same browser-rendering service used by
         # rvb.  It supplies ordinary page HTML/cookies; if it is absent or
-        # cannot obtain a page, preserve the existing provider fallback.
+        # cannot obtain a page, try the local headless-Chromium fallback
+        # (Patchright) before giving up on APKMirror.
         try:
             rendered = _via_trawl()
             if rendered:
@@ -88,10 +113,18 @@ def _cf_get(url, **kwargs):
                 return rendered
         except Exception as exc:
             logging.debug("APKMirror browser-service fallback failed: %s", exc)
+        try:
+            rendered = _via_browser()
+            if rendered:
+                _use_browser = True
+                return rendered
+        except Exception as exc:
+            logging.debug("APKMirror browser fallback failed: %s", exc)
         _blocked_by_cloudflare = True
         logging.warning(
-            "APKMirror served a Cloudflare challenge; skipping APKMirror "
-            "for this build instead of launching a browser."
+            "APKMirror served a Cloudflare challenge; Trawl and the "
+            "Patchright browser fallback both failed, skipping APKMirror "
+            "for this build."
         )
         raise ApkMirrorBlocked("APKMirror Cloudflare challenge")
     return response
