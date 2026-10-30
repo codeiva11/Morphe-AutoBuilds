@@ -115,10 +115,10 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
         
         if not cli:
             cli = utils.find_file(download_files, suffix=".jar")
-        patches = utils.find_file(download_files, contains="patches", suffix=".mpp")
+        patches = utils.find_file(download_files, contains="patches", suffix=".mpp", exclude=["javadoc", "sources"])
         if not patches:
             # Fallback to any .mpp file
-            patches = utils.find_file(download_files, suffix=".mpp")
+            patches = utils.find_file(download_files, suffix=".mpp", exclude=["javadoc", "sources"])
     else:
         # Find ReVanced files
         cli = utils.find_file(download_files, contains="revanced-cli", suffix=".jar")

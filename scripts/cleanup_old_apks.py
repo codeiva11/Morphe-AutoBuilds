@@ -93,6 +93,26 @@ def identity_prefix(apk_name: str) -> str:
     return Path(apk_name).stem.lower()
 
 
+def gh_release_sha256_assets(release: str) -> List[dict]:
+    """Return .sha256 sidecar assets currently attached to the release.
+
+    Only .sha256 assets are returned. A sidecar is orphaned once its APK is
+    superseded and deleted; the in-app updater only ever fetches
+    ``<apk>.sha256`` for APKs present in the release, so orphaned sidecars are
+    never read — but they accumulate forever without this cleanup.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "release", "view", release, "--json", "assets"],
+            capture_output=True, text=True, check=True,
+        )
+        assets = json.loads(result.stdout or "{}").get("assets", []) or []
+        return [a for a in assets if isinstance(a, dict)
+                and str(a.get("name", "")).endswith(".sha256")]
+    except Exception as e:
+        raise RuntimeError(f"could not list release assets: {e}")
+
+
 def load_keep_set(keep_file: Path) -> Set[str]:
     if not keep_file or not keep_file.exists():
         return set()
@@ -227,6 +247,43 @@ def main() -> int:
         print(f"❌ {len(to_delete) - deleted} asset(s) could not be deleted; "
               f"superseded APKs remain in the release.", file=sys.stderr)
         return 1
+
+    # Clean up orphaned .sha256 sidecars whose APK is gone from the release.
+    # A sidecar is kept only if its APK basename is in the keep-set or still
+    # present among the release's APK assets. Best-effort: a failure here must
+    # never fail the release (an orphaned sidecar is never fetched).
+    try:
+        sha_assets = gh_release_sha256_assets(args.release)
+    except RuntimeError as e:
+        print(f"⚠️  could not list .sha256 assets, skipping sidecar cleanup: {e}",
+              file=sys.stderr)
+        return 0
+    current_apk_names = {str(a.get("name", "")) for a in assets}
+    stale_sidecars = []
+    for asset in sha_assets:
+        name = str(asset.get("name", ""))
+        base = name[:-len(".sha256")] if name.endswith(".sha256") else ""
+        if not base or base in keep or base in current_apk_names:
+            continue
+        stale_sidecars.append(asset)
+    if not stale_sidecars:
+        print("No orphaned .sha256 sidecars found.")
+        return 0
+    print(f"Found {len(stale_sidecars)} orphaned .sha256 sidecar(s) to remove:")
+    sidecar_deleted = 0
+    for asset in stale_sidecars:
+        name = str(asset.get("name", ""))
+        asset_id = str(asset.get("id") or asset.get("apiUri", "")).strip()
+        if asset_id and "/" in asset_id:
+            asset_id = asset_id.rstrip("/").rsplit("/", 1)[-1]
+        if args.dry_run:
+            print(f"  [dry-run] would delete: {name}")
+        else:
+            if delete_asset(args.release, name, asset_id):
+                print(f"  🗑️  deleted: {name}")
+                sidecar_deleted += 1
+    print(f"Done. {'would delete' if args.dry_run else 'deleted'} "
+          f"{len(stale_sidecars) if args.dry_run else sidecar_deleted} orphaned sidecar(s).")
     return 0
 
 

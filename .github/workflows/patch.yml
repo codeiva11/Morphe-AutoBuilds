@@ -348,6 +348,13 @@ jobs:
           echo "📁 APKs ready for release:"
           ls -la ./release-apks/
 
+          echo "🔐 Generating SHA-256 sidecars for the in-app updater..."
+          for apk in ./release-apks/*.apk; do
+            [ -f "$apk" ] || continue
+            (cd ./release-apks && sha256sum "$(basename "$apk")" > "$(basename "$apk").sha256")
+          done
+          ls -la ./release-apks/
+
           final_count=$(ls -1 ./release-apks/*.apk 2>/dev/null | wc -l || echo "0")
           echo "📊 Total APKs: $final_count"
 
@@ -416,6 +423,11 @@ jobs:
             basename "$apk" >> current_assets.txt
           done
 
+          for sidecar in ./release-apks/*.sha256; do
+            [ -f "$sidecar" ] || continue
+            basename "$sidecar" >> current_assets.txt
+          done
+
           if [ -f ./release-apks/manifest.json ]; then
             echo "manifest.json" >> current_assets.txt
           fi
@@ -475,8 +487,11 @@ jobs:
 
           echo "📦 Releasing $apk_count APK(s)..."
 
-          # Build the asset list: APKs + optional manifest.json
+          # Build the asset list: APKs + SHA-256 sidecars + optional manifest.json
           ASSETS=( ./release-apks/*.apk )
+          for sidecar in ./release-apks/*.sha256; do
+            [ -f "$sidecar" ] && ASSETS+=( "$sidecar" )
+          done
           if [ -f ./release-apks/manifest.json ]; then
             ASSETS+=( ./release-apks/manifest.json )
             echo "📎 Including manifest.json"
