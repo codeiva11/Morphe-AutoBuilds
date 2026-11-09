@@ -211,6 +211,23 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
                                 opts.append(f"-O{opt}")
                     include_patches.extend(["-e", name_opts, *opts])
 
+    # For apps whose source bundle is not Sunil's morphe-patches, fetch it as a
+    # second patch bundle so the in-app update checker (which lives only in his
+    # bundle) is applied to every app. YouTube already uses it as its source.
+    morphe_patches = None
+    if source != "morphe":
+        try:
+            morphe_release = utils.detect_github_release("codeiva11", "morphe-patches", "latest")
+            for asset in morphe_release.get("assets", []):
+                if asset["name"].endswith(".mpp"):
+                    morphe_patches = downloader.download_resource(asset["browser_download_url"])
+                    logging.info(f"✅ Using Morphe patches bundle: {morphe_patches.name}")
+                    break
+            if morphe_patches is None:
+                logging.warning("⚠️ No .mpp asset in codeiva11/morphe-patches latest release; building without the in-app update checker")
+        except Exception as e:
+            logging.warning(f"⚠️ Could not download Morphe patches bundle ({e}); building without the in-app update checker")
+
     for attempt_idx, ver in enumerate(versions_to_try):
         if attempt_idx > 0:
             logging.warning(
@@ -313,9 +330,19 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
                 morphe_cmd = [
                     "java", "-jar", str(cli),
                     "patch", "--patches", str(patches),
+                    *exclude_patches, *include_patches,
+                ]
+                if morphe_patches is not None:
+                    # Second bundle: Sunil's own morphe-patches, which carries the
+                    # in-app update checker for the non-YouTube apps. Patch
+                    # selections are per-bundle, so the -e must follow this --patches.
+                    morphe_cmd += [
+                        "--patches", str(morphe_patches),
+                        "-e", "Enable in-app update checker",
+                    ]
+                morphe_cmd += [
                     "--continue-on-error",
                     "--out", str(output_apk), str(input_apk),
-                    *exclude_patches, *include_patches
                 ]
                 cli_output = utils.run_process(morphe_cmd, capture=True, stream=True)
             else:
