@@ -219,7 +219,10 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
         try:
             morphe_release = utils.detect_github_release("codeiva11", "morphe-patches", "latest")
             for asset in morphe_release.get("assets", []):
-                if asset["name"].endswith(".mpp"):
+                # The release also carries patches-<ver>-javadoc.mpp and
+                # patches-<ver>-sources.mpp; only the plain patches-<ver>.mpp
+                # is the patch bundle.
+                if asset["name"].endswith(".mpp") and "-javadoc" not in asset["name"] and "-sources" not in asset["name"]:
                     morphe_patches = downloader.download_resource(asset["browser_download_url"])
                     logging.info(f"✅ Using Morphe patches bundle: {morphe_patches.name}")
                     break
