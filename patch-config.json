@@ -27,6 +27,10 @@
     {
       "app_name": "x-new",
       "source": "piko-newx"
+    },
+    {
+      "app_name": "pixel-camera",
+      "source": "pixelcamera"
     }
   ]
 }
