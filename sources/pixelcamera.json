@@ -1,0 +1,15 @@
+[
+    {
+        "name": "morphe-patches-pixelcamera"
+    },
+    {
+        "user": "MorpheApp",
+        "repo": "morphe-cli",
+        "tag": "latest"
+    },
+    {
+        "user": "Akshayykadam",
+        "repo": "Pixel-Camera",
+        "tag": "latest"
+    }
+]
