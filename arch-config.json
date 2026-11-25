@@ -23,10 +23,5 @@
     "app_name": "messenger",
     "source": "revanced",
     "arches": ["arm64-v8a", "armeabi-v7a"]
-  },
-  {
-    "app_name": "pixel-camera",
-    "source": "pixelcamera",
-    "arches": ["arm64-v8a"]
   }
 ]
