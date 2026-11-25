@@ -21,6 +21,19 @@ class ScrapedResponse:
     def text(self) -> str:
         return self.content.decode("utf-8", errors="replace")
 
+    def raise_for_status(self) -> None:
+        """Mirror requests.Response.raise_for_status().
+
+        Callers of _cf_get() (e.g. apkmirror.py's download flow) treat the
+        result as a plain requests response. Without this, any page that had
+        to come through the Trawl/Patchright browser path crashed with
+        AttributeError instead of downloading.
+        """
+        if self.status_code >= 400:
+            raise requests.HTTPError(
+                f"{self.status_code} for url: {self.url}", response=self
+            )
+
 
 def fetch(url: str, referer: str | None = None) -> ScrapedResponse | None:
     """Return browser-rendered HTML when the optional local service is enabled."""
