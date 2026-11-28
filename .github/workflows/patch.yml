@@ -86,11 +86,24 @@ jobs:
           if [ "$BEHIND" -gt 0 ]; then
             echo "Merging upstream updates..."
             if git merge upstream/main -X ours --no-edit -m "chore: sync upstream scraper fixes"; then
-              # GITHUB_TOKEN cannot push commits that add/modify workflow files;
-              # keep our own workflows authoritative so the push is not rejected.
-              git checkout HEAD^1 -- .github/workflows/ || true
-              git commit --amend --no-edit || true
+              echo "Merge succeeded."
+            else
+              echo "Merge hit conflicts; resolving in favour of HEAD (our side)..."
+              # -X ours does not resolve modify/delete conflicts: files we
+              # deleted (e.g. apps/codeberg/facebook.json, removed on purpose)
+              # but upstream modified stay unmerged. Keep our deletion.
+              git status --porcelain | awk '$1 == "DU" {print $2}' | while read -r f; do git rm -- "$f"; done
+              # Any other unmerged paths: take our version.
+              git diff --name-only --diff-filter=U | while read -r f; do git checkout --ours -- "$f" 2>/dev/null; git add -- "$f"; done
+              git commit --no-edit || true
             fi
+            # GITHUB_TOKEN cannot push commits that add/modify workflow files;
+            # keep our own workflows authoritative so the push is not rejected.
+            # (checkout alone does not drop upstream-added workflow files from
+            # the index, so clear the index entries first.)
+            git rm --cached -r .github/workflows/ >/dev/null 2>&1 || true
+            git checkout HEAD^1 -- .github/workflows/ || true
+            git commit --amend --no-edit || true
             git push origin main || true
           else
             echo "Already fully in sync with upstream."
