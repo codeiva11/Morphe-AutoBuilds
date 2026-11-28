@@ -85,7 +85,12 @@ jobs:
           echo "Commits behind upstream: $BEHIND"
           if [ "$BEHIND" -gt 0 ]; then
             echo "Merging upstream updates..."
-            git merge upstream/main -X ours --no-edit -m "chore: sync upstream scraper fixes" || true
+            if git merge upstream/main -X ours --no-edit -m "chore: sync upstream scraper fixes"; then
+              # GITHUB_TOKEN cannot push commits that add/modify workflow files;
+              # keep our own workflows authoritative so the push is not rejected.
+              git checkout HEAD^1 -- .github/workflows/ || true
+              git commit --amend --no-edit || true
+            fi
             git push origin main || true
           else
             echo "Already fully in sync with upstream."
