@@ -14,6 +14,7 @@ from src import (
     apkcombo,
     apkfab,
     codeberg,
+    androidapksbox,
 )
 
 
@@ -23,29 +24,59 @@ class UnknownPatchCompatibilityError(ValueError):
     build with silently skipped patches, so the build must fail loudly instead
     of falling back to latest."""
 
+
+_rejected_abis: set[str] = set()
+
+
+def clear_rejected_abis() -> None:
+    _rejected_abis.clear()
+
+
+def record_rejected_abis(abis) -> None:
+    for abi in abis or ():
+        norm = utils._normalize_abi(abi)
+        if norm in utils.KNOWN_ABIS and norm not in ("x86", "x86_64"):
+            _rejected_abis.add(norm)
+
+
+def get_rejected_abis() -> set[str]:
+    return set(_rejected_abis)
+
 def download_resource(url: str, name: str = None) -> Path:
-    res = session.get(url, stream=True)
-    res.raise_for_status()
-    final_url = res.url
+    last_error = None
+    for attempt in range(2):
+        filepath = Path(name) if name else None
+        try:
+            res = session.get(url, stream=True, timeout=180)
+            res.raise_for_status()
+            final_url = res.url
 
-    if not name:
-        name = utils.extract_filename(res, fallback_url=final_url)
+            if not name:
+                name = utils.extract_filename(res, fallback_url=final_url)
 
-    filepath = Path(name)
-    total_size = int(res.headers.get('content-length', 0))
-    downloaded_size = 0
+            filepath = Path(name)
+            total_size = int(res.headers.get('content-length', 0))
+            downloaded_size = 0
 
-    with filepath.open("wb") as file:
-        for chunk in res.iter_content(chunk_size=8192):
-            if chunk:
-                file.write(chunk)
-                downloaded_size += len(chunk)
+            with filepath.open("wb") as file:
+                for chunk in res.iter_content(chunk_size=8192):
+                    if chunk:
+                        file.write(chunk)
+                        downloaded_size += len(chunk)
 
-    logging.info(
-        f"URL: {final_url} [{downloaded_size}/{total_size}] -> \"{filepath}\" [1]"
-    )
-
-    return filepath
+            logging.info(
+                f"URL: {final_url} [{downloaded_size}/{total_size}] -> \"{filepath}\" [1]"
+            )
+            return filepath
+        except Exception as e:
+            last_error = e
+            if filepath and filepath.exists():
+                filepath.unlink(missing_ok=True)
+            if attempt == 0:
+                logging.warning(f"Download reset for {url} ({e}); retrying once...")
+                time.sleep(2)
+                continue
+            raise last_error
 
 def download_required(source: str) -> tuple[list[Path], str]:
     source_path = Path("sources") / f"{source}.json"
@@ -136,6 +167,35 @@ def download_from_bundle(bundle_info: dict) -> tuple[list[Path], str]:
     
     return downloaded_files, name
 
+def _download_links(links: list[str]) -> Path | None:
+    """Download one or more variant files for a single app version.
+
+    A single link downloads exactly as before. Multiple links are
+    per-device variants of the same version (same base APK, different
+    config splits): download each under a part name, combine them into one
+    bundle with the union of their entries, and return it under the first
+    file's name so downstream merge/patch steps see a single bundle.
+    """
+    if len(links) == 1:
+        return download_resource(links[0])
+
+    first = download_resource(links[0])
+    parts = [first]
+    for i, link in enumerate(links[1:], start=1):
+        part_name = f"{first.stem}__part{i}{first.suffix}"
+        parts.append(download_resource(link, name=part_name))
+
+    combined = first.with_name(f"{first.stem}__combined{first.suffix}")
+    result = utils.combine_bundles(parts, combined)
+    for p in parts:
+        p.unlink(missing_ok=True)
+    if result is None:
+        return None
+    result.replace(first)
+    logging.info(f"Combined {len(parts)} variants into {first.name}")
+    return first
+
+
 def download_platform(
     app_name: str,
     platform: str,
@@ -152,7 +212,7 @@ def download_platform(
                 config = json.load(json_file)
         else:
             # Fallback: search other platform config directories for this app
-            for other_platform in ["apkmirror", "uptodown", "apkpure", "aptoide", "github", "apkcombo", "apkfab"]:
+            for other_platform in ["apkmirror", "uptodown", "apkpure", "aptoide", "github", "apkcombo", "apkfab", "androidapksbox"]:
                 if other_platform == platform:
                     continue
                 other_path = Path("apps") / other_platform / f"{app_name}.json"
@@ -161,8 +221,19 @@ def download_platform(
                         with other_path.open() as json_file:
                             other_cfg = json.load(json_file)
                         if other_cfg.get("package"):
+                            aliases = []
+                            for p_dir in ["apkmirror", "uptodown", "apkpure", "aptoide", "apkcombo", "apkfab", "androidapksbox"]:
+                                p_file = Path("apps") / p_dir / f"{app_name}.json"
+                                if p_file.exists():
+                                    try:
+                                        p_data = json.loads(p_file.read_text(encoding="utf-8"))
+                                        if p_data.get("name") and p_data["name"] not in aliases:
+                                            aliases.append(p_data["name"])
+                                    except Exception:
+                                        pass
                             config = {
                                 "name": other_cfg.get("name", app_name),
+                                "aliases": aliases,
                                 "package": other_cfg["package"],
                                 "version": other_cfg.get("version", ""),
                                 "arch": other_cfg.get("arch", "universal"),
@@ -224,12 +295,42 @@ def download_platform(
         for version in candidates:
             if not version:
                 continue
-            download_link = platform_module.get_download_link(version, app_name, config)
-            if not download_link:
+            # Some platforms (APKPure) list several per-device variant
+            # downloads for one version; fetch all of them and combine, so
+            # the bundle carries every variant's splits (notably all ABIs).
+            links: list[str] = []
+            multi = getattr(platform_module, "get_download_links", None)
+            if callable(multi):
+                try:
+                    links = multi(version, app_name, config) or []
+                except Exception as e:
+                    logging.debug(f"get_download_links failed for {app_name}: {e}")
+                    links = []
+            if not links:
+                download_link = platform_module.get_download_link(version, app_name, config)
+                if download_link:
+                    links = [download_link]
+            if not links:
                 last_error = ValueError(f"No download link found for {app_name} version {version}")
                 continue
             try:
-                filepath = download_resource(download_link)
+                filepath = _download_links(links)
+                if filepath is None:
+                    raise ValueError(f"Failed to combine variant downloads for {app_name} version {version}")
+                filepath = utils.ensure_usable_apk(filepath, app_name, version)
+                if filepath is None:
+                    last_error = ValueError(f"Unusable download for {app_name} version {version}")
+                    continue
+                ok_abi, abis = utils.has_required_abis(filepath, arch)
+                if not ok_abi:
+                    logging.warning(
+                        f"Discarding download from {platform} for {app_name} v{version}: "
+                        f"it provides ABIs {sorted(abis)}, which do not cover {arch or 'universal'}; trying next candidate"
+                    )
+                    record_rejected_abis(abis)
+                    filepath.unlink(missing_ok=True)
+                    last_error = ValueError(f"Incompatible ABIs {sorted(abis)} for {app_name} v{version}")
+                    continue
                 return filepath, version, candidates
             except Exception as e:
                 last_error = e
@@ -318,6 +419,15 @@ def download_apkfab(
     override_version: str = None,
 ) -> tuple[Path | None, str | None, list[str]]:
     return download_platform(app_name, "apkfab", cli, patches, arch, override_version)
+
+def download_androidapksbox(
+    app_name: str,
+    cli: str,
+    patches: str,
+    arch: str = None,
+    override_version: str = None,
+) -> tuple[Path | None, str | None, list[str]]:
+    return download_platform(app_name, "androidapksbox", cli, patches, arch, override_version)
 
 def download_apkeditor() -> Path:
     max_retries = 3

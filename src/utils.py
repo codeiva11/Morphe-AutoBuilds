@@ -250,6 +250,15 @@ def get_supported_versions(package_name: str, cli: str, patches: str) -> Optiona
     # args, missing patches, etc.) so we can decide what to do.
     output = run_process(cmd, capture=True, silent=True, check=False)
 
+    # Morphe CLI omits disabled-by-default patches and experimental targets
+    # unless -u (--count-unused-patches) and -x (--include-experimental) are passed.
+    if is_morphe_cli and (not output or len(output.splitlines()) <= 2):
+        retry_out = run_process([*cmd, "-u", "-x"], capture=True, silent=True, check=False)
+        if retry_out and len(retry_out.splitlines()) > 2:
+            retry_first = retry_out.splitlines()[0].strip().lower()
+            if 'usage:' not in retry_first and 'unmatched argument' not in retry_first and 'error' not in retry_first:
+                output = retry_out
+
     if not output:
         logging.warning("No output returned from list-versions command")
         return None
@@ -293,7 +302,7 @@ def get_supported_versions(package_name: str, cli: str, patches: str) -> Optiona
                 "list-patches",
                 "--with-packages",
                 "--with-versions",
-                patches,
+                "--patches", patches,
             ]
             alt_out = run_process(alt_cmd, capture=True, silent=True, check=False) or ""
             derived: list[str] = []
@@ -326,13 +335,19 @@ def get_supported_version(package_name: str, cli: str, patches: str) -> Optional
     versions = get_supported_versions(package_name, cli, patches)
     return versions[0] if versions else None
 
+def _sanitize_filename(name: str) -> str:
+    """Replace OS-reserved characters so titles like 'SoundCloud: ...' work cross-platform."""
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', unquote(name)).strip(" .")
+    return cleaned or "download.apk"
+
+
 def extract_filename(response, fallback_url=None) -> str:
     cd = response.headers.get('content-disposition')
     if cd:
         _, params = parse_header(cd)
         filename = params.get('filename') or params.get('filename*')
         if filename:
-            return unquote(filename)
+            return _sanitize_filename(filename)
 
     parsed = urlparse(response.url)
     query_params = parse_qs(parsed.query)
@@ -341,10 +356,10 @@ def extract_filename(response, fallback_url=None) -> str:
         _, params = parse_header(unquote(rcd[0]))
         filename = params.get('filename') or params.get('filename*')
         if filename:
-            return unquote(filename)
+            return _sanitize_filename(filename)
 
     path = urlparse(fallback_url or response.url).path
-    return unquote(Path(path).name)
+    return _sanitize_filename(Path(path).name)
 
 def gh_api_request(endpoint: str) -> dict:
     """Make a GitHub API request using the 'gh' CLI as it handles tokens more robustly in Actions"""
@@ -476,6 +491,23 @@ def detect_codeberg_release(user: str, repo: str, tag: str) -> dict:
         raise ValueError(f"Unexpected Codeberg release response shape for {user}/{repo}/{tag}")
     return normalize_release(data.get("tag_name"), data.get("published_at"), data.get("assets") or [])
 
+def _select_release_by_tag(releases: list[dict], tag: str, user: str, repo: str) -> dict:
+    """Pick the matching newest release dict for '', 'dev', or 'prerelease'."""
+    if not releases:
+        raise ValueError(f"No releases found for {user}/{repo}")
+    if tag == "":
+        return max(releases, key=lambda x: x['created_at'])
+    if tag == "dev":
+        devs = [r for r in releases if 'dev' in r['tag_name'].lower()]
+        if not devs:
+            raise ValueError(f"No dev release found for {user}/{repo}")
+        return max(devs, key=lambda x: x['created_at'])
+    pres = [r for r in releases if r['prerelease']]
+    if not pres:
+        raise ValueError(f"No prerelease found for {user}/{repo}")
+    return max(pres, key=lambda x: x['created_at'])
+
+
 def detect_github_release(user: str, repo: str, tag: str) -> dict:
     if tag == "latest":
         release_lookup = "latest"
@@ -502,23 +534,7 @@ def detect_github_release(user: str, repo: str, tag: str) -> dict:
                     if not isinstance(data, list):
                         # Handle case where API might return a single object (unlikely for /releases)
                         data = [data]
-                        
-                    if not data:
-                        raise ValueError(f"No releases found for {user}/{repo}")
-                    
-                    if tag == "":
-                        release = max(data, key=lambda x: x['created_at'])
-                    elif tag == "dev":
-                        devs = [r for r in data if 'dev' in r['tag_name'].lower()]
-                        if not devs:
-                            raise ValueError(f"No dev release found for {user}/{repo}")
-                        release = max(devs, key=lambda x: x['created_at'])
-                    else:
-                        pres = [r for r in data if r['prerelease']]
-                        if not pres:
-                            raise ValueError(f"No prerelease found for {user}/{repo}")
-                        release = max(pres, key=lambda x: x['created_at'])
-                    return release
+                    return _select_release_by_tag(data, tag, user, repo)
                 else:
                     data = gh_api_request(f"repos/{user}/{repo}/releases/tags/{tag}")
                     return data
@@ -529,6 +545,9 @@ def detect_github_release(user: str, repo: str, tag: str) -> dict:
                 if tag == "latest":
                     release = repo_obj.get_latest_release()
                     return release.raw_data
+                if tag in ["", "dev", "prerelease"]:
+                    releases = [r.raw_data for r in repo_obj.get_releases()[:20]]
+                    return _select_release_by_tag(releases, tag, user, repo)
                 return repo_obj.get_release(tag).raw_data
                     
         except Exception as e:
@@ -564,22 +583,30 @@ def detect_source_type(cli_file: Path, patches_file: Path) -> str:
     return "unknown"
 
 
-def strip_zip_entries(zip_path: Path, patterns: list[str]) -> None:
-    """Strip matching file patterns from a ZIP archive in a cross-platform way."""
+def strip_zip_entries(zip_path: Path, patterns: list[str]) -> bool:
+    """Strip matching file patterns from a ZIP archive; return True if modified."""
     if not zip_path or not zip_path.exists():
-        return
+        return False
+
+    import fnmatch
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zin:
+            if not any(any(fnmatch.fnmatch(item.filename, p) for p in patterns) for item in zin.infolist()):
+                return False
+    except Exception as e:
+        logging.debug(f"Failed inspecting zip before strip: {e}")
+        return False
 
     if shutil.which("zip"):
         try:
             run_process(["zip", "--delete", str(zip_path)] + patterns, silent=True, check=False)
-            return
+            return True
         except Exception:
             pass
 
     # Pure Python fallback using zipfile
     temp_zip = zip_path.with_suffix(".tmp.zip")
     try:
-        import fnmatch
         modified = False
         with zipfile.ZipFile(zip_path, 'r') as zin:
             with zipfile.ZipFile(temp_zip, 'w', compression=zin.compression) as zout:
@@ -591,12 +618,13 @@ def strip_zip_entries(zip_path: Path, patterns: list[str]) -> None:
         if modified:
             zip_path.unlink()
             temp_zip.rename(zip_path)
-        else:
-            temp_zip.unlink(missing_ok=True)
+            return True
+        temp_zip.unlink(missing_ok=True)
     except Exception as e:
         logging.debug(f"Failed to strip zip entries: {e}")
         if temp_zip.exists():
             temp_zip.unlink(missing_ok=True)
+    return False
 
 
 def check_apk_integrity(apk_path: Path) -> bool:
@@ -673,3 +701,96 @@ def ensure_usable_apk(apk_path: Path, app_name: str, version: str) -> Path | Non
         logging.info(f"APK {apk_path.name} passes zip integrity check")
 
     return apk_path
+
+
+KNOWN_ABIS = {"arm64-v8a", "armeabi-v7a", "armeabi", "x86", "x86_64"}
+_SPLIT_ABI_RE = re.compile(r"config\.([a-z0-9_]+)\.apk$", re.IGNORECASE)
+
+
+def _normalize_abi(token: str) -> str:
+    return token.strip().lower().replace("_", "-")
+
+
+def download_abis(path: Path) -> set[str]:
+    """Return the native ABIs a downloaded APK or bundle provably provides.
+
+    Plain APK: its ``lib/<abi>/`` entries. Bundle (XAPK/APKS/APKM): the
+    ``config.<abi>`` split APK names (which is exactly what the APKEditor
+    merge will carry into the merged APK) plus any ``lib/<abi>/`` entries.
+
+    An empty set means "no evidence": the app may have no native code at
+    all, or its libraries sit inside a bundle's base APK where this listing
+    cannot see them. Callers must only reject a download on positive
+    evidence (a non-empty set missing a required ABI), never on an empty
+    set.
+    """
+    abis: set[str] = set()
+    if not path or not path.exists() or not zipfile.is_zipfile(path):
+        return abis
+    try:
+        with zipfile.ZipFile(path, "r") as z:
+            for name in z.namelist():
+                parts = name.split("/")
+                if len(parts) >= 2 and parts[0] == "lib":
+                    abi = _normalize_abi(parts[1])
+                    if abi in KNOWN_ABIS:
+                        abis.add(abi)
+                m = _SPLIT_ABI_RE.search(name)
+                if m:
+                    abi = _normalize_abi(m.group(1))
+                    if abi in KNOWN_ABIS:
+                        abis.add(abi)
+    except Exception:
+        pass
+    return abis
+
+
+def required_abis_for_arch(arch: str | None) -> set[str]:
+    """Return the native ABI set required for a target build architecture."""
+    normalized = (arch or "universal").strip() or "universal"
+    if normalized in ("universal", "noarch"):
+        return {"arm64-v8a"}
+    return {normalized}
+
+
+def has_required_abis(path: Path, arch: str | None) -> tuple[bool, set[str]]:
+    """Check whether ``path`` satisfies ``arch`` based on observable native ABIs.
+
+    Empty ABI set means no native libraries were detected (noarch/Java-only
+    or libraries inside a nested base APK), which is accepted per ``download_abis``.
+    """
+    abis = download_abis(path)
+    if not abis:
+        return True, abis
+    return required_abis_for_arch(arch).issubset(abis), abis
+
+
+def combine_bundles(paths: list[Path], out_path: Path) -> Path | None:
+    """Combine several bundle files into one bundle holding the union of
+    their entries (first occurrence wins on duplicate names).
+
+    Mirrors serve per-device variants of the same app version as separate
+    XAPKs whose split sets differ (one carries the arm64-v8a config split,
+    another the armeabi-v7a split, a third extra languages). Merging any
+    single variant produces an APK that lacks the other variants' splits;
+    the union is what a full bundle would have contained.
+    """
+    try:
+        seen: set[str] = set()
+        with zipfile.ZipFile(out_path, "w") as zout:
+            for p in paths:
+                with zipfile.ZipFile(p, "r") as zin:
+                    for item in zin.infolist():
+                        if item.is_dir() or item.filename in seen:
+                            continue
+                        seen.add(item.filename)
+                        zout.writestr(item, zin.read(item.filename))
+        logging.info(
+            f"Combined {len(paths)} bundle variants into {out_path.name} "
+            f"({len(seen)} unique entries)"
+        )
+        return out_path
+    except Exception as e:
+        logging.warning(f"Failed to combine bundle variants: {e}")
+        out_path.unlink(missing_ok=True)
+        return None

@@ -6,6 +6,7 @@ from sys import exit
 from pathlib import Path
 from os import getenv
 import subprocess
+import shutil
 from src import (
     r2,
     utils,
@@ -36,6 +37,21 @@ _BUILD_SUFFIX = re.compile(r"(?:\s+build\s+\d+|\s*\(\d+\))\s*$", re.IGNORECASE)
 def _version_without_build(version: str) -> str:
     """Drop a trailing `` build <digits>`` or parenthetical build number."""
     return _BUILD_SUFFIX.sub("", version).strip()
+
+
+def _should_force_build_suffix_match(output: str | None, downloaded_version: str) -> bool:
+    """Return True when Morphe CLI applied 0 patches solely because the APK's
+    manifest version includes a trailing build suffix (e.g. '32.41.0(1667052)')
+    while its base version matches the downloaded target ('32.41.0')."""
+    if not output or not _APPLYING_ZERO_PATCHES.search(output):
+        return False
+    downloaded_base = utils.normalize_version(_version_without_build(downloaded_version))
+    for match in _FILTERING_PATCHES.finditer(output):
+        filtered = match.group(2).strip().rstrip(".")
+        base = _version_without_build(filtered)
+        if base != filtered and utils.normalize_version(base) == downloaded_base:
+            return True
+    return False
 
 def _unpatched_build_reason(output: str | None, downloaded_version: str) -> str | None:
     """Return why a zero-exit patch CLI run must not be signed, or None to accept.
@@ -147,15 +163,11 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
         downloader.download_aptoide,
         downloader.download_uptodown,
         downloader.download_apkfab,
+        downloader.download_androidapksbox,
         downloader.download_github,
         downloader.download_codeberg,
         downloader.download_apkcombo,
     ]
-
-    # Facebook: Codeberg only. No mirror fallbacks, fail if Codeberg fails.
-    if app_name == "facebook":
-        download_methods = [downloader.download_codeberg]
-        logging.info("Facebook: using Codeberg only (no mirror fallbacks)")
 
     input_apk = None
     version = None
@@ -170,6 +182,21 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
         apk_path = utils.ensure_usable_apk(apk_path, app_name, ver or "")
         if apk_path is None:
             logging.warning(f"Discarding unusable download from {method.__name__}; trying next source")
+            continue
+        # Reject downloads that provably lack the architecture being built.
+        # Mirrors serve per-device variants (for example an XAPK whose only
+        # ABI split is armeabi-v7a); patching one and shipping it as
+        # "universal" produces an APK that refuses to install on 64-bit-only
+        # devices. No ABI evidence (no visible splits or libraries) is not
+        # a rejection; the post-merge guard below is the backstop.
+        ok_abi, abis = utils.has_required_abis(apk_path, arch)
+        if not ok_abi:
+            logging.warning(
+                f"Discarding download from {method.__name__}: it provides ABIs "
+                f"{sorted(abis)}, which do not cover {arch}; trying next source"
+            )
+            downloader.record_rejected_abis(abis)
+            apk_path.unlink(missing_ok=True)
             continue
         input_apk, version, candidates = apk_path, ver, cands
         used_method = method
@@ -348,6 +375,12 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
                     "--out", str(output_apk), str(input_apk),
                 ]
                 cli_output = utils.run_process(morphe_cmd, capture=True, stream=True)
+                if _should_force_build_suffix_match(cli_output, version):
+                    logging.info(
+                        f"Retrying Morphe patch with -f because APK manifest appends a build suffix to {version}"
+                    )
+                    output_apk.unlink(missing_ok=True)
+                    cli_output = utils.run_process([*morphe_cmd, "-f"], capture=True, stream=True)
             else:
                 logging.info("🔧 Using ReVanced patching system...")
                 cli_name = Path(cli).name.lower()
@@ -407,6 +440,38 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
         if not apksigner:
             raise RuntimeError("apksigner not found")
 
+        # --- ARCHITECTURE-SPECIFIC LIB STRIPPING (POST-PATCH, PRE-SIGN) ---
+        # Strip excluded ABIs on output_apk after patching succeeds so input_apk
+        # retains its stock developer signature for patches that inspect it.
+        strip_patterns = {
+            "arm64-v8a": ["lib/x86/*", "lib/x86_64/*", "lib/armeabi-v7a/*"],
+            "armeabi-v7a": ["lib/x86/*", "lib/x86_64/*", "lib/arm64-v8a/*"],
+        }.get(arch, ["lib/x86/*", "lib/x86_64/*"])
+        stripped = utils.strip_zip_entries(output_apk, strip_patterns)
+
+        need_align = stripped
+        if app_name in ("tiktok", "twitter", "x-new"):
+            from src.play_updates import disable_play_store_updates
+            disable_play_store_updates(output_apk)
+            need_align = True
+
+        if need_align:
+            zipalign = shutil.which("zipalign")
+            if not zipalign:
+                for cand in (
+                    Path(apksigner).with_name("zipalign"),
+                    Path(apksigner).with_name("zipalign.exe"),
+                ):
+                    if cand.exists():
+                        zipalign = str(cand)
+                        break
+            if zipalign:
+                aligned_apk = output_apk.with_suffix(".aligned.apk")
+                utils.run_process([zipalign, "-f", "-P", "16", "4", str(output_apk), str(aligned_apk)])
+                aligned_apk.replace(output_apk)
+            elif app_name in ("tiktok", "twitter", "x-new"):
+                raise RuntimeError("zipalign not found")
+
         try:
             utils.run_process([
                 str(apksigner), "sign", "--verbose",
@@ -437,6 +502,35 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
     # If we got here, every candidate version failed.
     return None
 
+def _build_arches_with_fallback(app_name: str, source: str, arches: list[str]) -> list[str]:
+    """Build requested architectures, falling back to available ABI variants
+    if an automatic universal build fails solely due to single-ABI downloads."""
+    downloader.clear_rejected_abis()
+    built_apks: list[str] = []
+    for arch in arches:
+        logging.info(f"🔨 Building {app_name} for {arch} architecture...")
+        apk_path = run_build(app_name, source, arch)
+        if apk_path:
+            built_apks.append(apk_path)
+            print(f"✅ Built {arch} version: {Path(apk_path).name}")
+
+    if not built_apks and arches == ["universal"]:
+        rejected = downloader.get_rejected_abis()
+        fallback_arches = [a for a in ("arm64-v8a", "armeabi-v7a") if a in rejected]
+        if fallback_arches:
+            logging.warning(
+                f"Universal build for {app_name} could not cover 64-bit+universal ABIs; "
+                f"falling back to available variant architecture(s): {fallback_arches}"
+            )
+            for alt_arch in fallback_arches:
+                logging.info(f"🔨 Building {app_name} for {alt_arch} architecture (variant fallback)...")
+                apk_path = run_build(app_name, source, alt_arch)
+                if apk_path:
+                    built_apks.append(apk_path)
+                    print(f"✅ Built {alt_arch} version: {Path(apk_path).name}")
+    return built_apks
+
+
 def main():
     app_name = getenv("APP_NAME")
     source = getenv("SOURCE")
@@ -458,14 +552,7 @@ def main():
                 arches = config["arches"]
                 break
         
-        # Build for each architecture
-        built_apks = []
-        for arch in arches:
-            logging.info(f"🔨 Building {app_name} for {arch} architecture...")
-            apk_path = run_build(app_name, source, arch)
-            if apk_path:
-                built_apks.append(apk_path)
-                print(f"✅ Built {arch} version: {Path(apk_path).name}")
+        built_apks = _build_arches_with_fallback(app_name, source, arches)
         
         # Summary
         print(f"\n🎯 Built {len(built_apks)} APK(s) for {app_name}:")
@@ -476,11 +563,12 @@ def main():
             exit(1)
         
     else:
-        # Fallback to single universal build
+        # Fallback to universal (and per-ABI variants if universal rejects single-ABI downloads)
         logging.warning("arch-config.json not found, building universal only")
-        apk_path = run_build(app_name, source, "universal")
-        if apk_path:
-            print(f"🎯 Final APK path: {apk_path}")
+        built_apks = _build_arches_with_fallback(app_name, source, ["universal"])
+        if built_apks:
+            for apk in built_apks:
+                print(f"🎯 Final APK path: {apk}")
         else:
             logging.error(f"❌ No APK built for {app_name}; failing the job.")
             exit(1)

@@ -52,7 +52,7 @@ This repository utilizes a robust Python-based pipeline to ensure high reliabili
 
 * **Fully Automated:** GitHub Actions workflow executes daily at 06:00 UTC, requiring zero manual intervention.
 * **Architecture Optimization:** Builds specific `arm64-v8a`, `armeabi-v7a`, and `universal` APKs to reduce file size and improve performance on target devices.
-* **Multi-Source Strategy:** Intelligent fetching from APKMirror, APKPure, and Uptodown ensures high success rates even if one source is down.
+* **Multi-Source Strategy:** Intelligent fetching from APKMirror, APKPure, and Uptodown ensures high success rates even if one source is down. Uptodown downloads resolve through its mobile API, which is not behind the Turnstile challenge that now guards the website download flow.
 * **Granular Build Control:** Simple text-based configuration allows for precise inclusion or exclusion of specific build options.
 * **Smart Failover:** The system automatically switches download sources if a fetch attempt fails.
 * **Auto-Signing:** All APKs are signed with a consistent public keystore, making them ready to install immediately.
@@ -137,6 +137,57 @@ Located in the `apps/` directory. Example for `apps/apkmirror/youtube.json`:
 }
 
 ```
+
+### Uptodown downloads (mobile API)
+
+Uptodown moved its website download flow behind Cloudflare Turnstile in
+mid/late 2026. Direct `curl`/`wget` requests, and therefore shared
+GitHub-hosted runner IPs, are treated as high risk and cannot pass that
+challenge. The pipeline therefore resolves Uptodown downloads through the same
+anonymous API the official Android app uses, as
+[Obtainium](https://github.com/ImranR98/Obtainium) does:
+
+1. `POST https://www.uptodown.app/eapi/auth/token` with a signed anonymous
+   identifier (`HMAC-SHA256` over a unix timestamp) returns a short-lived
+   bearer token.
+2. `GET /eapi/apps/<app code>/file/<file id>/downloadUrl` resolves a catalog
+   file id to a signed `dw.uptodown.com` URL that serves the APK/XAPK directly.
+
+The catalog HTML is still used to discover the app code, versions, and file
+ids; the HTML download-button flow and FlareSolverr remain only as fallbacks.
+Implementation: [`src/uptodown_api.py`](src/uptodown_api.py), wired into
+[`src/uptodown.py`](src/uptodown.py).
+
+The anonymous client credentials can rotate, so they are overridable without a
+code change (set them as repository variables or step `env`):
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `UPTODOWN_API_CLIENT_VERSION` | Android client version sent as `Identificador-Version` | `739` |
+| `UPTODOWN_API_HMAC_KEY` | Anonymous client signing key | built-in |
+| `UPTODOWN_API_USER_AGENT` | Android `Dalvik` user agent | built-in |
+| `UPTODOWN_API_HOST` | API host | `https://www.uptodown.app` |
+
+Offline regression: `python tests/test_uptodown_api.py`.
+
+### Play Store update protection
+
+TikTok, Twitter and X builds set `android:versionCode` to `2147483647` before
+alignment and signing, matching Morphe's **Disable Play Store updates** patch.
+Package IDs, `versionName`, patch selection and the existing signing key stay
+unchanged. This prevents ordinary higher-version Play Store update offers; it
+is not a root-level detach and does not erase Play Store's cached listings.
+
+Future protected builds can replace protected installs at the same version code.
+Returning to a stock/lower-version-code build requires uninstalling first (with
+potential data loss). Orion's current update detection compares `versionName`,
+so the fixed code does not hide newer Orion versions. When first deploying this
+change, force a full rebuild so the incremental release does not carry over old
+APKs.
+
+Requires Android SDK `zipalign` with 16 KB page-alignment support alongside
+`apksigner`. Run the offline regression check with
+`python tests/test_play_updates.py`.
 
 ### 4. Build Options
 
