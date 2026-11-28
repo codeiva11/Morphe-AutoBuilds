@@ -135,6 +135,10 @@ def run_process(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        # Tool output can contain non-UTF-8 bytes (Java console encoding, app
+        # names with accents such as "Pokécardex"). Never let a stray byte turn
+        # into UnicodeDecodeError and abort a build.
+        errors="replace",
         shell=shell
     )
 
@@ -199,6 +203,54 @@ def get_highest_version(versions: list[str]) -> str | None:
         if normalize_version(v) > normalize_version(highest_version):
             highest_version = v
     return highest_version
+
+def _reports_no_compatible_versions(output: str) -> bool:
+    """True when the patch CLI explicitly reports that it has nothing for the app.
+
+    Morphe/ReVanced print e.g. ``No compatible versions found in: patches.mpp``
+    when no patch in the bundle targets the queried package. That is a definite
+    "unsupported", not "patches are version-agnostic": building the store's
+    latest in that case can only produce an APK that no patch applies to.
+    """
+    return re.search(r"no compatible versions", output or "", re.IGNORECASE) is not None
+
+
+_VERSION_CODE_RE = re.compile(
+    r"(ARM64_V8A|ARMEABI_V7A|ARMEABI|x86_64|x86)\s*=\s*(\d+)", re.IGNORECASE
+)
+_VERSION_CODE_ARCH = {
+    "arm64_v8a": "arm64-v8a",
+    "armeabi_v7a": "armeabi-v7a",
+    "armeabi": "armeabi",
+    "x86_64": "x86_64",
+    "x86": "x86",
+}
+_supported_version_codes: dict[str, int] = {}
+
+
+def remember_version_codes(cli_output: str) -> None:
+    """Record the ABI -> versionCode pairs the patch CLI declares.
+
+    Morphe CLI prints e.g. ``588.0.0.42.55 [versionCodes: ARM64_V8A=707615136,
+    ARMEABI_V7A=707615135] (123 patches)``. A store can publish several builds
+    for one version string (different uploads/rollouts), and only the declared
+    versionCode is the build the patches were made against. Mirrors use this to
+    pick the matching variant instead of whichever row happens to be first.
+    """
+    _supported_version_codes.clear()
+    for abi, code in _VERSION_CODE_RE.findall(cli_output or ""):
+        arch = _VERSION_CODE_ARCH.get(abi.lower())
+        if arch:
+            _supported_version_codes[arch] = int(code)
+
+
+def preferred_version_code(arch: str | None) -> int | None:
+    """Return the patch-declared versionCode for ``arch``, if the CLI reported one."""
+    normalized = (arch or "universal").strip().lower()
+    if normalized in ("universal", "noarch", ""):
+        normalized = "arm64-v8a"
+    return _supported_version_codes.get(normalized)
+
 
 def get_supported_versions(package_name: str, cli: str, patches: str) -> Optional[list[str]]:
     """Return the app versions the patch bundle declares compatibility with.
@@ -265,6 +317,7 @@ def get_supported_versions(package_name: str, cli: str, patches: str) -> Optiona
 
     lines = output.splitlines()
     logging.info(f"CLI raw output lines: {lines}")
+    remember_version_codes(output)
 
     # Detect CLI error/usage output (wrong syntax, unrecognized args, etc.)
     first_line = lines[0].strip().lower()
@@ -273,6 +326,12 @@ def get_supported_versions(package_name: str, cli: str, patches: str) -> Optiona
         return None
 
     if len(lines) <= 2:
+        if _reports_no_compatible_versions(output):
+            logging.warning(
+                f"Patch bundle reports no compatible versions for {package_name}; "
+                "treating the app as unsupported instead of building a stock APK"
+            )
+            return None
         logging.warning("Output has no version lines")
         return []
 
@@ -318,6 +377,12 @@ def get_supported_versions(package_name: str, cli: str, patches: str) -> Optiona
             pass
 
     if not versions:
+        if _reports_no_compatible_versions(output):
+            logging.warning(
+                f"Patch bundle reports no compatible versions for {package_name}; "
+                "treating the app as unsupported instead of building a stock APK"
+            )
+            return None
         logging.warning("No supported versions found")
         return []
 

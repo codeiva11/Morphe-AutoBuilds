@@ -40,7 +40,7 @@ A sophisticated, automated pipeline that assembles installable Android applicati
 
 ### 📱 Supported Apps & Architectures
 
-The full list of supported apps lives in [`patch-config.json`](patch-config.json) (95 apps and growing). Each app can target `arm64-v8a`, `armeabi-v7a`, and/or `universal` builds, configured in [`arch-config.json`](arch-config.json).
+The full list of supported apps lives in [`patch-config.json`](patch-config.json) (100 apps and growing). Each app can target `arm64-v8a`, `armeabi-v7a`, and/or `universal` builds, configured in [`arch-config.json`](arch-config.json).
 
 *( Legend: ✅ = Available / ❌ = Not configured )*
 
@@ -138,6 +138,40 @@ Located in the `apps/` directory. Example for `apps/apkmirror/youtube.json`:
 
 ```
 
+### Update detection
+
+`scripts/check_app_updates.py` rebuilds an app when any of these is true:
+
+* **The patch source published something new** — the source signature combines
+  the release tag/date/assets (and, for GitHub, the default-branch commit SHA),
+  so new releases, re-uploaded assets and plain commits all trigger a rebuild.
+* **The patches declare support for a newer app version** — when a patch source
+  publishes a machine-readable patches list, its highest non-experimental target
+  is compared with the version that was actually built.
+* **The patches are version-agnostic and the app itself was updated** — the
+  builder records `version_agnostic: true` in the build records when it used the
+  store's newest version (because the CLI declared no specific versions). Only
+  those entries are compared against the store's latest version, so apps whose
+  patches target specific versions never rebuild on every store bump.
+
+Apps with a pinned `version` in their app config are never rebuilt by store
+changes. The version-agnostic flag is written by the first build after this
+change and carried forward in `manifest.json` from then on.
+
+### GitLab release updates
+
+[`scripts/gitlab_publish_release.py`](scripts/gitlab_publish_release.py) updates
+the GitLab `latest` release incrementally:
+
+* the `latest` tag is **never moved or deleted** during a publish — in GitLab
+  that deletes the release and every asset link on it;
+* only the rebuilt APKs' links are added or replaced; other apps stay untouched;
+* links lost by an earlier failed run are repaired from the package registry;
+* superseded versions of the *same* app/architecture/patch build are pruned, and
+  duplicate package-registry entries are collapsed;
+* the post-publish check fails if any registry APK has no release link or if the
+  manifest references an APK that no longer exists.
+
 ### Uptodown downloads (mobile API)
 
 Uptodown moved its website download flow behind Cloudflare Turnstile in
@@ -204,6 +238,39 @@ Located in `patches/`. Example for `patches/youtube-morphe.txt`. Use `+` to forc
 - amoled
 
 ```
+
+### ABI selection policy
+
+Every app is built along one preference order:
+
+```text
+universal -> arm64-v8a -> armeabi-v7a
+```
+
+* A **universal** APK installs on every device, so it is attempted first.
+* If no source can produce it (for example when the only download for a version
+  is a 32-bit split), the build is retried as **arm64-v8a**, and only if that
+  also fails as **armeabi-v7a**. The pipeline never silently ships a lower-ABI
+  build under the `universal` name.
+* Explicit entries in [`arch-config.json`](arch-config.json) are still honoured:
+  an app listed for `arm64-v8a` and `armeabi-v7a` produces both, and each target
+  falls back down the same order if it cannot be built.
+* When a mirror publishes several builds for the same ABI, the newest Android
+  baseline wins (Facebook, for example, ships separate Android 9+ and Android
+  11+ arm64 bundles, and its patches only work on the newer one).
+* If the patch CLI declares `versionCodes:` for the app, the mirror upload with
+  that exact versionCode is preferred over other uploads of the same version
+  string (mirrors often publish several builds for one version).
+
+The order lives in [`src/downloader.py`](src/downloader.py) (`ARCH_PRIORITY`,
+`fallback_arches`) and is applied by the build loop in
+[`src/__main__.py`](src/__main__.py). Offline regression:
+`python tests/test_arch_fallback.py`.
+
+If a patch bundle reports **no compatible versions** for an app, the build now
+stops immediately with an explicit error instead of downloading the store's
+latest APK and refusing to sign an unpatched result — that usually means the
+app's patch source dropped support (or was never updated) for that package.
 
 ---
 

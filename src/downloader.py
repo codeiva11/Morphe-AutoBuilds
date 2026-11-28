@@ -27,6 +27,55 @@ class UnknownPatchCompatibilityError(ValueError):
 
 _rejected_abis: set[str] = set()
 
+# Build-target preference order. A universal APK installs on every device, so
+# it is always attempted first; arm64-v8a covers all current 64-bit devices and
+# is the next best; armeabi-v7a is the last resort (32-bit only devices, and the
+# single-ABI downloads some mirrors serve for a "universal" request).
+ARCH_PRIORITY = ("universal", "arm64-v8a", "armeabi-v7a")
+
+_ARCH_ALIASES = {
+    "arm-v7a": "armeabi-v7a",
+    "armv7": "armeabi-v7a",
+    "armv7a": "armeabi-v7a",
+    "arm64": "arm64-v8a",
+    "aarch64": "arm64-v8a",
+}
+
+# How the last download picked its app version. "latest" means the patches were
+# version-agnostic and the store's newest version was used, which the update
+# planner needs to know to rebuild when the app (not the patches) updates.
+_last_version_mode: str | None = None
+
+
+def set_version_mode(mode: str) -> None:
+    global _last_version_mode
+    _last_version_mode = mode
+
+
+def get_version_mode() -> str | None:
+    return _last_version_mode
+
+
+def normalize_arch(arch: str | None) -> str:
+    """Return a canonical architecture name (defaults to ``universal``)."""
+    value = (arch or "universal").strip().lower()
+    if not value:
+        return "universal"
+    return _ARCH_ALIASES.get(value, value)
+
+
+def fallback_arches(arch: str | None) -> list[str]:
+    """Return the build targets to try, in order, after ``arch`` fails.
+
+    ``universal`` degrades to ``arm64-v8a`` and then ``armeabi-v7a``;
+    ``arm64-v8a`` degrades to ``armeabi-v7a``. Unknown targets have no
+    fallback, so an explicitly requested architecture stays explicit.
+    """
+    value = normalize_arch(arch)
+    if value not in ARCH_PRIORITY:
+        return []
+    return list(ARCH_PRIORITY[ARCH_PRIORITY.index(value) + 1:])
+
 
 def clear_rejected_abis() -> None:
     _rejected_abis.clear()
@@ -78,14 +127,27 @@ def download_resource(url: str, name: str = None) -> Path:
                 continue
             raise last_error
 
+# Tools (CLI patches) are immutable within one build process. The ABI fallback
+# may call run_build several times, so cache them instead of re-downloading the
+# whole patch bundle for every architecture attempt.
+_required_cache: dict[str, tuple[list[Path], str]] = {}
+
+
 def download_required(source: str) -> tuple[list[Path], str]:
+    cached = _required_cache.get(source)
+    if cached and all(path.exists() for path in cached[0]):
+        logging.info(f"Reusing already downloaded tools for source {source}")
+        return list(cached[0]), cached[1]
+
     source_path = Path("sources") / f"{source}.json"
     with source_path.open() as json_file:
         repos_info = json.load(json_file)
 
     # Handle bundle format
     if isinstance(repos_info, dict) and "bundle_url" in repos_info:
-        return download_from_bundle(repos_info)
+        result = download_from_bundle(repos_info)
+        _required_cache[source] = (list(result[0]), result[1])
+        return result
     
     # Handle old list format
     name = repos_info[0]["name"]
@@ -115,6 +177,7 @@ def download_required(source: str) -> tuple[list[Path], str]:
             else:
                 downloaded_files.append(download_resource(asset_url))
 
+    _required_cache[source] = (list(downloaded_files), name)
     return downloaded_files, name
 
 def download_from_bundle(bundle_info: dict) -> tuple[list[Path], str]:
@@ -271,18 +334,23 @@ def download_platform(
         pinned = (config.get("version") or "").strip()
         if override_version:
             candidates = [override_version]
+            version_mode = "override"
         elif pinned:
             candidates = [pinned]
+            version_mode = "pinned"
         else:
             compat = utils.get_supported_versions(config["package"], cli, patches)
             if compat is None:
                 raise UnknownPatchCompatibilityError(
                     f"Cannot determine patch-compatible versions for {app_name} "
-                    f"(package {config['package']}); refusing to fall back to "
-                    f"latest to avoid shipping a build with silently skipped patches."
+                    f"(package {config['package']}): the patch bundle reports no "
+                    f"supported versions for it, or the CLI could not be queried. "
+                    f"Refusing to fall back to latest to avoid shipping a build "
+                    f"with silently skipped patches."
                 )
             elif compat:
                 candidates = compat
+                version_mode = "compat"
             else:
                 try:
                     latest = platform_module.get_latest_version(app_name, config)
@@ -290,6 +358,8 @@ def download_platform(
                     logging.debug(f"Could not get latest version for {app_name} on {platform}: {e}")
                     latest = None
                 candidates = [latest] if latest else []
+                version_mode = "latest"
+        set_version_mode(version_mode)
 
         last_error: Exception | None = None
         for version in candidates:

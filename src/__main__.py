@@ -82,6 +82,26 @@ def _unpatched_build_reason(output: str | None, downloaded_version: str) -> str 
             )
     return None
 
+def _write_build_meta(version_mode: str | None) -> None:
+    """Record how this build chose its app version.
+
+    record_build.py and merge_manifest.py propagate this into manifest.json.
+    check_app_updates.py uses it to rebuild a version-agnostic app when the app
+    itself ships a new version (store latest), while version-pinned apps are
+    still rebuilt only when the patches change.
+    """
+    try:
+        Path("build_meta.json").write_text(
+            json.dumps({
+                "version_mode": version_mode or "",
+                "version_agnostic": version_mode == "latest",
+            }),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logging.warning(f"Could not write build_meta.json: {e}")
+
+
 def run_build(app_name: str, source: str, arch: str = "universal") -> str:
     """Build APK for specific architecture"""
     download_files, name = downloader.download_required(source)
@@ -173,8 +193,20 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
     version = None
     candidates: list[str] = []
     used_method = None
+    compat_errors: list[Exception] = []
     for method in download_methods:
-        apk_path, ver, cands = method(app_name, str(cli), str(patches), arch)
+        try:
+            apk_path, ver, cands = method(app_name, str(cli), str(patches), arch)
+        except downloader.UnknownPatchCompatibilityError as exc:
+            # Each mirror has its own app config, and they can disagree on the
+            # package id (stale APKMirror config vs the real package on the
+            # other mirrors). One source's package being unsupported must not
+            # abort the whole build: try the next source, which may use the
+            # package the patches actually target.
+            logging.warning(f"{method.__name__}: {exc}")
+            logging.warning("Trying the next source (it may use a different package id).")
+            compat_errors.append(exc)
+            continue
         if not apk_path:
             continue
         # A corrupt download must never reach the patcher: repair it, and if
@@ -200,11 +232,19 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
             continue
         input_apk, version, candidates = apk_path, ver, cands
         used_method = method
+        # Record how the version was chosen (latest store vs patch-declared)
+        # while it is still known; build records persist it for the planner.
+        _write_build_meta(downloader.get_version_mode())
         break
 
     if input_apk is None or not used_method or not version:
         logging.error(f"❌ Failed to download APK for {app_name}")
         logging.error("All download sources failed. Skipping this app.")
+        if compat_errors and len(compat_errors) == len(download_methods):
+            # Every source rejected the package as unsupported: surface the
+            # clear error instead of a generic "no download" so the patch
+            # source/config gets fixed.
+            raise compat_errors[-1]
         return None
 
     # Try the downloaded version first, then (if available) older compatible
@@ -503,31 +543,43 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
     return None
 
 def _build_arches_with_fallback(app_name: str, source: str, arches: list[str]) -> list[str]:
-    """Build requested architectures, falling back to available ABI variants
-    if an automatic universal build fails solely due to single-ABI downloads."""
+    """Build the requested architectures, degrading to the next best ABI on failure.
+
+    Every app follows the same preference order: universal -> arm64-v8a ->
+    armeabi-v7a. If a requested target cannot be produced (typically because the
+    only downloadable APK for that version is a lower-ABI split), the next best
+    ABI is attempted instead of shipping the lower-ABI build as "universal" or
+    failing outright. Once a target in a fallback chain succeeds, the chain
+    stops: a universal build that degrades to arm64-v8a does not also produce
+    an armeabi-v7a APK. Explicitly requested architectures are still all built
+    (for example an app configured for both arm64-v8a and armeabi-v7a).
+    """
     downloader.clear_rejected_abis()
     built_apks: list[str] = []
-    for arch in arches:
-        logging.info(f"🔨 Building {app_name} for {arch} architecture...")
-        apk_path = run_build(app_name, source, arch)
-        if apk_path:
-            built_apks.append(apk_path)
-            print(f"✅ Built {arch} version: {Path(apk_path).name}")
+    attempted: set[str] = set()
 
-    if not built_apks and arches == ["universal"]:
-        rejected = downloader.get_rejected_abis()
-        fallback_arches = [a for a in ("arm64-v8a", "armeabi-v7a") if a in rejected]
-        if fallback_arches:
-            logging.warning(
-                f"Universal build for {app_name} could not cover 64-bit+universal ABIs; "
-                f"falling back to available variant architecture(s): {fallback_arches}"
-            )
-            for alt_arch in fallback_arches:
-                logging.info(f"🔨 Building {app_name} for {alt_arch} architecture (variant fallback)...")
-                apk_path = run_build(app_name, source, alt_arch)
-                if apk_path:
-                    built_apks.append(apk_path)
-                    print(f"✅ Built {alt_arch} version: {Path(apk_path).name}")
+    for requested in arches:
+        chain = [downloader.normalize_arch(requested), *downloader.fallback_arches(requested)]
+        for arch in chain:
+            if arch in attempted:
+                continue
+            attempted.add(arch)
+            logging.info(f"🔨 Building {app_name} for {arch} architecture...")
+            # A raised error means the APK was produced but patching/merging
+            # failed; retrying another ABI would re-download the same app build
+            # and fail the same way. Only a None return (no usable download for
+            # this ABI) is worth retrying with the next ABI.
+            apk_path = run_build(app_name, source, arch)
+            if apk_path:
+                built_apks.append(apk_path)
+                print(f"✅ Built {arch} version: {Path(apk_path).name}")
+                break
+            further = [a for a in downloader.fallback_arches(arch) if a not in attempted]
+            if further:
+                logging.warning(
+                    f"{arch} build for {app_name} produced no APK; falling back to "
+                    f"{', '.join(further)} (preference: {' -> '.join(downloader.ARCH_PRIORITY)})"
+                )
     return built_apks
 
 

@@ -787,6 +787,22 @@ def _is_unreliable_source_sig(sig: str) -> bool:
     )
 
 
+def _apk_belongs_to_app(apk_name: str, app: str) -> bool:
+    """True when a manifest APK name is really this app's build output.
+
+    Manifests written before the build-record fix can point at files that came
+    with a patch source (e.g. ``hush-unpacker-0.25.0.apk`` recorded as Facebook's
+    build) or at raw mirror downloads. Carrying those over would publish them as
+    the app's update, so treat them as "no APK recorded" and rebuild instead.
+    """
+    if not apk_name or not app:
+        return False
+    return (
+        apk_name.lower().startswith(f"{app.lower()}-")
+        and extract_version_from_filename(apk_name) != ""
+    )
+
+
 def _recover_apk_from_release(app: str, arch: str, existing_apks: List[str]) -> str:
     a = (app or "").lower()
     rarch = (arch or "").lower()
@@ -850,6 +866,12 @@ def plan_incremental(full_matrix: List[dict], old_manifest: Optional[dict],
         if old and old_src_sig and _is_unreliable_source_sig(cur_src_sig):
             cur_src_sig = old_src_sig
         carried_apk = (old or {}).get("apk", "")
+        if carried_apk and not _apk_belongs_to_app(carried_apk, app):
+            logging.warning(
+                f"  {app}/{src}: ignoring manifest APK {carried_apk!r}; it is not "
+                f"a build output of {app}"
+            )
+            carried_apk = ""
         # built_version is the version actually shipped in the carried APK
         # (populated post-build by record_build.py -> merge_manifest.py). Carry
         # it forward so we can compare it against the store's newest version.
@@ -876,6 +898,12 @@ def plan_incremental(full_matrix: List[dict], old_manifest: Optional[dict],
             # apk filename is filled in *after* build by the workflow; for now
             # carry over whatever the old manifest had so we know what to keep.
             "apk": carried_apk,
+            # Persisted by merge_manifest.py after a successful build: how the
+            # builder chose the version (store "latest" for version-agnostic
+            # patches, or a patch-declared version). Carried forward so the
+            # planner keeps applying the right rebuild rule.
+            "version_agnostic": bool((old or {}).get("version_agnostic", False)),
+            "version_mode": (old or {}).get("version_mode", ""),
             # Preserved verbatim; refreshed by the merge step after each build.
             "built_version": old_built_ver,
         }
@@ -926,6 +954,19 @@ def plan_incremental(full_matrix: List[dict], old_manifest: Optional[dict],
                     logging.debug(
                         f"  {app}/{src}: no patches-list JSON available; "
                         f"relying on source-signature for rebuild detection"
+                    )
+
+            # Version-agnostic patches: the builder shipped the store's newest
+            # version, so a new app release (no patch change) must trigger a
+            # rebuild. Only entries that were actually built that way are
+            # compared, which prevents version-pinned apps from rebuilding on
+            # every store bump (the loop the old unconditional fallback caused).
+            if (not cur_app_ver and old_built_ver
+                    and (old or {}).get("version_agnostic")):
+                store_latest = fetch_latest_app_version(app)
+                if store_latest and _is_newer_version(store_latest, old_built_ver):
+                    reasons.append(
+                        f"app-updated: built {old_built_ver!r} -> store {store_latest!r}"
                     )
             old_apk = carried_apk
             if old_apk and old_apk not in existing_apk_set:
